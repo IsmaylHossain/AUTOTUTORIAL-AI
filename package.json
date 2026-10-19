@@ -1,0 +1,39 @@
+{
+  "name": "autotutorial-ai",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "postinstall": "playwright install chromium && node scripts/ensure-media.cjs",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm run build",
+    "setup": "playwright install chromium",
+    "clean": "node -e \"require(\"fs\").rmSync(\".next\",{recursive:true,force:true})\"",
+    "setup:media": "node scripts/ensure-media.cjs",
+    "diagnose:media": "node scripts/diagnose-media.cjs"
+  },
+  "dependencies": {
+    "ffmpeg-static": "^5.2.0",
+    "ffprobe-static": "^3.1.0",
+    "groq-sdk": "^0.37.0",
+    "jszip": "^3.10.2",
+    "lucide-react": "^0.468.0",
+    "next": "^15.5.0",
+    "playwright": "^1.55.0",
+    "pptxgenjs": "^4.0.1",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "sharp": "^0.35.5",
+    "uuid": "^11.0.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.1.13",
+    "@types/node": "^22.10.2",
+    "@types/react": "^19.0.2",
+    "@types/react-dom": "^19.0.2",
+    "tailwindcss": "^4.1.13",
+    "typescript": "^5.7.2"
+  }
+}
