@@ -175,6 +175,9 @@ export async function startRecording(id: string, url: string) {
       args: ["--start-maximized"],
     },
   );
+  const cursorOverlay = path.resolve(process.cwd(), "lib/cursor-overlay.js");
+  if (fs.existsSync(cursorOverlay))
+    await context.addInitScript({ path: cursorOverlay });
   const inject = path.resolve(process.cwd(), "lib/recorder-inject.js");
   if (fs.existsSync(inject)) await context.addInitScript({ path: inject });
   const page = context.pages()[0] || (await context.newPage());

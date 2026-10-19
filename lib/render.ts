@@ -34,61 +34,6 @@ function escapeFilterPath(value: string) {
     .replace(/\[/g, "\\[")
     .replace(/\]/g, "\\]");
 }
-type CursorPoint = {
-  time: number;
-  xRatio: number;
-  yRatio: number;
-};
-function cursorPoints(actions: any[], introSec: number) {
-  const points = actions
-    .filter(
-      (action) =>
-        ["move", "click"].includes(action.type) &&
-        Number.isFinite(Number(action.activeMs)) &&
-        Number.isFinite(Number(action.x)) &&
-        Number.isFinite(Number(action.y)) &&
-        Number(action.viewportWidth) > 0 &&
-        Number(action.viewportHeight) > 0,
-    )
-    .map((action) => ({
-      time: introSec + Math.max(0, Number(action.activeMs) / 1000),
-      xRatio: Math.min(
-        1,
-        Math.max(0, Number(action.x) / Number(action.viewportWidth)),
-      ),
-      yRatio: Math.min(
-        1,
-        Math.max(0, Number(action.y) / Number(action.viewportHeight)),
-      ),
-    }))
-    .sort((a, b) => a.time - b.time)
-    .filter((point, index, all) => !index || point.time > all[index - 1].time);
-  if (points.length <= 480) return points;
-  const stride = Math.ceil(points.length / 480);
-  const reduced = points.filter((_, index) => index % stride === 0);
-  const last = points[points.length - 1];
-  if (reduced[reduced.length - 1] !== last) reduced.push(last);
-  return reduced;
-}
-function cursorExpression(
-  points: CursorPoint[],
-  axis: "x" | "y",
-) {
-  const dimension = axis === "x" ? "main_w" : "main_h";
-  const ratio = (point: CursorPoint) =>
-    (axis === "x" ? point.xRatio : point.yRatio).toFixed(6);
-  let expression = `${ratio(points[points.length - 1])}*${dimension}`;
-  for (let index = points.length - 2; index >= 0; index--) {
-    const start = points[index];
-    const end = points[index + 1];
-    const duration = Math.max(0.001, end.time - start.time);
-    const startValue = `${ratio(start)}*${dimension}`;
-    const endValue = `${ratio(end)}*${dimension}`;
-    const position = `${startValue}+(${endValue}-${startValue})*(t-${start.time.toFixed(3)})/${duration.toFixed(3)}`;
-    expression = `if(lt(t,${end.time.toFixed(3)}),${position},${expression})`;
-  }
-  return expression;
-}
 function ensureVideo(file: string) {
   if (!file || !fs.existsSync(file))
     throw new Error("The source recording file does not exist.");
@@ -304,33 +249,14 @@ export async function render(id: string) {
       `drawbox=x=${x.toFixed(1)}:y=${y.toFixed(1)}:w=${w.toFixed(1)}:h=${h.toFixed(1)}:color=black@0.96:t=fill:enable='between(t,${sec.toFixed(3)},${en.toFixed(3)})'`,
     );
   }
-  const cursorAsset = path.resolve(
-    process.cwd(),
-    "public",
-    "icons8-cursor-480.png",
-  );
-  const moves = cursorPoints(timeline.actions, introSec);
-  const showCursor = moves.length > 0 && fs.existsSync(cursorAsset);
-  const visual = ["-y", "-i", source];
-  if (showCursor) {
-    const first = moves[0].time;
-    const last = Math.min(outputDur, moves[moves.length - 1].time + 0.8);
-    const xExpression = cursorExpression(moves, "x");
-    const yExpression = cursorExpression(moves, "y");
-    visual.push(
-      "-loop",
-      "1",
-      "-i",
-      cursorAsset,
-      "-filter_complex",
-      `[0:v]${filters.join(",")}[base];[1:v]scale=30:30[cursor];[base][cursor]overlay=x='(${xExpression})-4':y='(${yExpression})-4':enable='between(t,${first.toFixed(3)},${last.toFixed(3)})':shortest=1[outv]`,
-      "-map",
-      "[outv]",
-    );
-  } else {
-    visual.push("-vf", filters.join(","), "-map", "0:v:0");
-  }
-  visual.push(
+  const visual = [
+    "-y",
+    "-i",
+    source,
+    "-vf",
+    filters.join(","),
+    "-map",
+    "0:v:0",
     "-c:v",
     "libx264",
     "-preset",
@@ -348,7 +274,7 @@ export async function render(id: string) {
     "pipe:1",
     "-nostats",
     out,
-  );
+  ];
   try {
     await runFfmpeg(
       id,
