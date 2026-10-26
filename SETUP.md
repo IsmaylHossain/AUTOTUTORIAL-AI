@@ -16,18 +16,22 @@ npm run setup:media
 
 Then restart the development server.
 
-## 2. Configure Groq
+## 2. Configure Groq and/or Gemini
 
 Create `.env.local`:
 
 ```env
+AI_PROVIDER=groq
 GROQ_API_KEY=your_groq_key_here
-GROQ_MODEL=llama-3.3-70b-versatile
-GROQ_TTS_MODEL=canopylabs/orpheus-v1-english
-GROQ_TTS_VOICE=hannah
+GROQ_MODEL=openai/gpt-oss-120b
+GEMINI_API_KEY=your_gemini_key_here
+GEMINI_MODEL=gemini-3.8-flash
+EDGE_TTS_VOICE=en-US-AriaNeural
 ```
 
-The application uses Groq for tutorial-step generation and narration. If Groq narration fails on macOS, the local `say` command is used as a non-cloud fallback.
+You can also enter both keys in the Settings page. Choose a text provider and model there. Tutorial narration defaults to Microsoft Edge Neural TTS and needs no API key. The Settings voice selector includes female and male voices such as Aria and Jenny. Edge audio is retried and converted to PCM WAV with FFmpeg. If it fails, narration uses native system speech (`say` on macOS, System.Speech on Windows, or espeak-ng on Linux).
+
+Cloud AI is preferred for step text. If it fails, the app uses professional local step templates.
 
 ## 3. Check local dependencies
 

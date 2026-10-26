@@ -90,7 +90,7 @@ export async function createPptx(id: string): Promise<ArrayBuffer> {
     ink: "172033",
     muted: "667085",
     border: "DCE3EC",
-    amber: "F59E0B",
+    focus: "38BDF8",
   };
   const screenshotDir = path.join(dir(id), "screenshots");
   const screenshots = fs.existsSync(screenshotDir)
@@ -111,9 +111,13 @@ export async function createPptx(id: string): Promise<ArrayBuffer> {
     const actionIndex = Number.isInteger(step.actionIndex)
       ? Number(step.actionIndex)
       : stepOrder;
-    const name = screenshots[actionIndex];
+    const action = actions[actionIndex];
+    const name =
+      action?.screenshot && screenshots.includes(action.screenshot)
+        ? action.screenshot
+        : screenshots[actionIndex];
     if (!name) continue;
-    stepSlides.push({ step, action: actions[actionIndex], name });
+    stepSlides.push({ step, action, name });
   }
   const slideCount = stepSlides.length;
 
@@ -407,29 +411,33 @@ export async function createPptx(id: string): Promise<ArrayBuffer> {
         w: imageWidth,
         h: imageHeight,
       });
-      if (action?.type === "click" && action.targetRect) {
+      if (
+        ["click", "select", "change"].includes(action?.type) &&
+        action.targetRect
+      ) {
         const rect = action.targetRect;
         const highlightX = imageX + (rect.x / viewportWidth) * imageWidth;
         const highlightY = imageY + (rect.y / viewportHeight) * imageHeight;
         const highlightWidth = (rect.width / viewportWidth) * imageWidth;
         const highlightHeight = (rect.height / viewportHeight) * imageHeight;
-        const highlightLeft = Math.max(imageX, highlightX - 0.06);
-        const highlightTop = Math.max(imageY, highlightY - 0.06);
+        const highlightLeft = Math.max(imageX, highlightX - 0.04);
+        const highlightTop = Math.max(imageY, highlightY - 0.04);
         const highlightRight = Math.min(
           imageX + imageWidth,
-          highlightX + highlightWidth + 0.06,
+          highlightX + highlightWidth + 0.04,
         );
         const highlightBottom = Math.min(
           imageY + imageHeight,
-          highlightY + highlightHeight + 0.06,
+          highlightY + highlightHeight + 0.04,
         );
-        slide.addShape(pptx.ShapeType.rect, {
+        slide.addShape(pptx.ShapeType.roundRect, {
           x: highlightLeft,
           y: highlightTop,
           w: Math.max(0.01, highlightRight - highlightLeft),
           h: Math.max(0.01, highlightBottom - highlightTop),
-          fill: { color: colors.amber, transparency: 76 },
-          line: { color: colors.amber, width: 2 },
+          rectRadius: 0.06,
+          fill: { color: colors.white, transparency: 100 },
+          line: { color: colors.focus, width: 2.25 },
         });
       }
       slide.addShape(pptx.ShapeType.line, {

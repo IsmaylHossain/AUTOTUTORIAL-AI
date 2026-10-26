@@ -1,9 +1,14 @@
 import { spawn, ChildProcess } from "child_process";
 import fs from "fs";
 import path from "path";
+import sharp from "sharp";
 import { dir, get, save, settings } from "./store";
 import { buildTimeline, INTRO_DURATION_MS } from "./timeline";
-import { ffmpegPath as resolveFfmpeg, readMediaDuration } from "./media";
+import {
+  ffmpegPath as resolveFfmpeg,
+  normalizeWavHeader,
+  readMediaDuration,
+} from "./media";
 
 const jobs = new Map<string, ChildProcess>();
 export function cancelRender(id: string) {
@@ -217,25 +222,33 @@ export async function render(id: string) {
     filters.push(
       `drawbox=x=0:y=0:w=iw:h=70:color=black@0.58:t=fill:enable='between(t,0,2.5)'`,
     );
-  for (const a of timeline.actions.filter(
-    (a) =>
-      a.targetRect && ["click", "input", "select", "change"].includes(a.type),
-  )) {
-    const r = a.targetRect!,
-      highlightMs =
-        a.type === "click"
-          ? Number(a.screenshotMs || a.activeMs || 0)
-          : Number(a.activeMs || 0),
-      sec = introSec + Math.max(0, highlightMs / 1000),
-      en = sec + 0.65,
-      x = Math.max(0, r.x - 7),
-      y = Math.max(0, r.y - 7),
-      w = Math.max(14, r.width + 14),
-      h = Math.max(14, r.height + 14);
-    filters.push(
-      `drawbox=x=${x.toFixed(1)}:y=${y.toFixed(1)}:w=${w.toFixed(1)}:h=${h.toFixed(1)}:color=yellow@0.14:t=fill:enable='between(t,${sec.toFixed(3)},${en.toFixed(3)})'`,
-      `drawbox=x=${x.toFixed(1)}:y=${y.toFixed(1)}:w=${w.toFixed(1)}:h=${h.toFixed(1)}:color=yellow@0.95:t=3:enable='between(t,${sec.toFixed(3)},${en.toFixed(3)})'`,
-    );
+  const focusOverlays: Array<{
+    file: string;
+    x: number;
+    y: number;
+    start: number;
+    end: number;
+  }> = [];
+  const focusActions = timeline.actions.filter(
+    (action) =>
+      action.targetRect && ["click", "select", "change"].includes(action.type),
+  );
+  for (const [index, action] of focusActions.entries()) {
+    const rect = action.targetRect!;
+    const width = Math.max(14, Math.ceil(rect.width + 8));
+    const height = Math.max(14, Math.ceil(rect.height + 8));
+    const radius = Math.max(5, Math.min(12, (height - 3) / 2));
+    const clickAt = introSec + Math.max(0, Number(action.activeMs || 0) / 1000);
+    const file = path.join(d, `.focus-${index}.png`);
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}"><rect x="1.5" y="1.5" width="${width - 3}" height="${height - 3}" rx="${radius}" ry="${radius}" fill="none" stroke="#38BDF8" stroke-width="3"/></svg>`;
+    await sharp(Buffer.from(svg)).png().toFile(file);
+    focusOverlays.push({
+      file,
+      x: Math.max(0, rect.x - 4),
+      y: Math.max(0, rect.y - 4),
+      start: Math.max(0, clickAt - 0.28),
+      end: clickAt + 0.02,
+    });
   }
   for (const a of timeline.actions.filter((a) => a.sensitive && a.targetRect)) {
     const r = a.targetRect!,
@@ -249,14 +262,31 @@ export async function render(id: string) {
       `drawbox=x=${x.toFixed(1)}:y=${y.toFixed(1)}:w=${w.toFixed(1)}:h=${h.toFixed(1)}:color=black@0.96:t=fill:enable='between(t,${sec.toFixed(3)},${en.toFixed(3)})'`,
     );
   }
+  const visualInputs = ["-y", "-i", source];
+  for (const overlay of focusOverlays)
+    visualInputs.push(
+      "-loop",
+      "1",
+      "-framerate",
+      String(timeline.fps),
+      "-i",
+      overlay.file,
+    );
+  const visualGraph = [`[0:v]${filters.join(",")}[base]`];
+  let visualOutput = "[base]";
+  focusOverlays.forEach((overlay, index) => {
+    const next = `[focus${index}]`;
+    visualGraph.push(
+      `${visualOutput}[${index + 1}:v]overlay=x=${overlay.x.toFixed(1)}:y=${overlay.y.toFixed(1)}:enable='between(t,${overlay.start.toFixed(3)},${overlay.end.toFixed(3)})'${next}`,
+    );
+    visualOutput = next;
+  });
   const visual = [
-    "-y",
-    "-i",
-    source,
-    "-vf",
-    filters.join(","),
+    ...visualInputs,
+    "-filter_complex",
+    visualGraph.join(";"),
     "-map",
-    "0:v:0",
+    visualOutput,
     "-c:v",
     "libx264",
     "-preset",
@@ -268,6 +298,8 @@ export async function render(id: string) {
     "-pix_fmt",
     "yuv420p",
     "-an",
+    "-t",
+    outputDur.toFixed(3),
     "-movflags",
     "+faststart",
     "-progress",
@@ -331,6 +363,9 @@ export async function render(id: string) {
       save(t);
       throw fallbackErr;
     }
+  } finally {
+    for (const overlay of focusOverlays)
+      fs.rmSync(overlay.file, { force: true });
   }
   const audioFiles = (timeline.steps || [])
     .map((s, i) =>
@@ -339,6 +374,7 @@ export async function render(id: string) {
         : path.join(d, "audio", `step-${String(i + 1).padStart(3, "0")}.wav`),
     )
     .filter((p) => fs.existsSync(p));
+  for (const file of audioFiles) normalizeWavHeader(file);
   if (audioFiles.length) {
     const narrated = path.join(d, "tutorial-narrated.mp4");
     const inputs = ["-y", "-i", out];

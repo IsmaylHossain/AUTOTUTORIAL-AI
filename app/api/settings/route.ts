@@ -1,3 +1,58 @@
-import {NextResponse} from 'next/server';import fs from 'fs';import path from 'path';import {settings,saveSettings} from '../../../lib/store';export const runtime='nodejs';
-export async function GET(){const s=settings();return NextResponse.json({...s,provider:'groq',groqConfigured:!!process.env.GROQ_API_KEY?.trim()})}
-export async function POST(req:Request){try{const body=await req.json();const apiKey=typeof body.apiKey==='string'?body.apiKey.trim():'';if(apiKey){const file=path.join(process.cwd(),'.env.local');let text=fs.existsSync(file)?fs.readFileSync(file,'utf8'):'';const re=/^GROQ_API_KEY=.*$/m;text=re.test(text)?text.replace(re,`GROQ_API_KEY=${apiKey}`):`${text.trimEnd()}\nGROQ_API_KEY=${apiKey}\n`;fs.writeFileSync(file,text);process.env.GROQ_API_KEY=apiKey;}const saved=saveSettings({...body,provider:'groq',apiKey:undefined});return NextResponse.json({ok:true,settings:saved})}catch(e:any){return NextResponse.json({ok:false,error:e.message||'Could not save settings.'},{status:500})}}
+import { NextResponse } from "next/server";
+import fs from "fs";
+import path from "path";
+import { saveSettings, settings } from "../../../lib/store";
+
+export const runtime = "nodejs";
+
+function configured() {
+  return {
+    groqConfigured: !!process.env.GROQ_API_KEY?.trim(),
+    geminiConfigured: !!process.env.GEMINI_API_KEY?.trim(),
+  };
+}
+
+function saveApiKey(name: "GROQ_API_KEY" | "GEMINI_API_KEY", raw: unknown) {
+  const value = typeof raw === "string" ? raw.trim() : "";
+  if (!value) return;
+  if (/[\r\n]/.test(value)) throw new Error(`${name} contains invalid characters.`);
+  const file = path.join(process.cwd(), ".env.local");
+  let text = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "";
+  const expression = new RegExp(`^${name}=.*$`, "m");
+  const line = `${name}=${value}`;
+  text = expression.test(text)
+    ? text.replace(expression, line)
+    : `${text.trimEnd()}\n${line}\n`;
+  fs.writeFileSync(file, text);
+  process.env[name] = value;
+}
+
+export async function GET() {
+  return NextResponse.json({ ...settings(), ...configured() });
+}
+
+export async function POST(request: Request) {
+  try {
+    const body = await request.json();
+    saveApiKey("GROQ_API_KEY", body.groqApiKey);
+    saveApiKey("GEMINI_API_KEY", body.geminiApiKey);
+    if (body.apiKey) {
+      saveApiKey(
+        body.provider === "gemini" ? "GEMINI_API_KEY" : "GROQ_API_KEY",
+        body.apiKey,
+      );
+    }
+    const saved = saveSettings({
+      ...body,
+      apiKey: undefined,
+      groqApiKey: undefined,
+      geminiApiKey: undefined,
+    });
+    return NextResponse.json({ ok: true, settings: saved, ...configured() });
+  } catch (error: any) {
+    return NextResponse.json(
+      { ok: false, error: error.message || "Could not save settings." },
+      { status: 500 },
+    );
+  }
+}

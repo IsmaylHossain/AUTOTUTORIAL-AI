@@ -21,8 +21,54 @@ function binaryUsable(candidate: string) {
   }
 }
 
+/**
+ * Some streaming TTS APIs leave RIFF and data sizes as 0xFFFFFFFF. That makes
+ * browsers and FFmpeg treat a short narration as truncated or many hours long.
+ * Replace only placeholder sizes; leave normal WAV files untouched.
+ */
+export function normalizeWavHeader(file: string): boolean {
+  if (!file || path.extname(file).toLowerCase() !== '.wav' || !fs.existsSync(file))
+    return false;
+  try {
+    const bytes = fs.readFileSync(file);
+    if (
+      bytes.length < 44 ||
+      bytes.toString('ascii', 0, 4) !== 'RIFF' ||
+      bytes.toString('ascii', 8, 12) !== 'WAVE'
+    )
+      return false;
+    let offset = 12;
+    let dataHeader = -1;
+    while (offset + 8 <= bytes.length) {
+      const id = bytes.toString('ascii', offset, offset + 4);
+      const size = bytes.readUInt32LE(offset + 4);
+      if (id === 'data') {
+        dataHeader = offset;
+        break;
+      }
+      if (size === 0xffffffff || offset + 8 + size > bytes.length) return false;
+      offset += 8 + size + (size % 2);
+    }
+    if (dataHeader < 0) return false;
+    const expectedRiffSize = bytes.length - 8;
+    const expectedDataSize = bytes.length - dataHeader - 8;
+    const needsRepair =
+      bytes.readUInt32LE(4) === 0xffffffff ||
+      bytes.readUInt32LE(dataHeader + 4) === 0xffffffff;
+    if (!needsRepair || expectedRiffSize > 0xffffffff || expectedDataSize > 0xffffffff)
+      return false;
+    bytes.writeUInt32LE(expectedRiffSize, 4);
+    bytes.writeUInt32LE(expectedDataSize, dataHeader + 4);
+    fs.writeFileSync(file, bytes);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function readMediaDuration(file: string): number {
   if (!file || !fs.existsSync(file)) return 0;
+  normalizeWavHeader(file);
   const ffprobe = ffprobePath();
   if (ffprobe) {
     try {

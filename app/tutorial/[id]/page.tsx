@@ -220,7 +220,11 @@ export default function TutorialPage() {
     });
     const d = await r.json().catch(() => ({}));
     setMsg(
-      r.ok ? "New narration ready." : d.error || "Voice generation failed.",
+      r.ok
+        ? d.source === "local"
+          ? "Microsoft Edge voice unavailable. Local system narration is ready."
+          : "New Microsoft Edge narration is ready."
+        : d.error || "Voice generation failed.",
     );
     load();
   }
@@ -435,8 +439,8 @@ export default function TutorialPage() {
             <Highlighter size={18} className="shrink-0" />
             <span>
               <b>Highlighter guidance:</b> important targets are emphasized with
-              a subtle yellow fill, border, and pulse. No zooming or camera
-              movement is used.
+              a tight sky-blue rounded focus border at the interaction moment.
+              No fill, zooming, or camera movement is used.
             </span>
           </div>
           <div className="card p-4 text-sm muted">

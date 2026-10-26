@@ -1,6 +1,12 @@
 import fs from "fs";
 import path from "path";
 import os from "os";
+import {
+  AiProvider,
+  DEFAULT_TTS_SETTINGS,
+  defaultsForProvider,
+  normalizeAiSettings,
+} from "./ai-options";
 
 export type Step = {
   title: string;
@@ -12,11 +18,14 @@ export type Step = {
   value?: string;
   audio?: string;
   actionIndex?: number;
+  textSource?: "ai" | "local";
+  voiceSource?: "edge" | "ai" | "local";
 };
 export type TutorialAction = {
   type: string;
   ts: number;
   activeMs?: number;
+  screenshot?: string;
   x?: number;
   y?: number;
   text?: string;
@@ -28,6 +37,7 @@ export type TutorialAction = {
   viewportHeight?: number;
   targetRect?: { x: number; y: number; width: number; height: number };
   sensitive?: boolean;
+  pickerOpen?: boolean;
 };
 export type PauseInterval = { startMs: number; endMs?: number };
 export type Tutorial = {
@@ -133,11 +143,17 @@ export function all() {
     .filter(Boolean)
     .sort((a: any, b: any) => b.createdAt.localeCompare(a.createdAt));
 }
+const environmentProvider: AiProvider =
+  process.env.AI_PROVIDER === "gemini" ? "gemini" : "groq";
+const environmentAiDefaults = defaultsForProvider(environmentProvider);
 const defaults = {
-  provider: "groq",
-  model: process.env.GROQ_MODEL || "llama-3.3-70b-versatile",
-  voice: process.env.GROQ_TTS_VOICE || "hannah",
-  ttsModel: process.env.GROQ_TTS_MODEL || "canopylabs/orpheus-v1-english",
+  ...environmentAiDefaults,
+  ...DEFAULT_TTS_SETTINGS,
+  model:
+    (environmentProvider === "gemini"
+      ? process.env.GEMINI_MODEL
+      : process.env.GROQ_MODEL) || environmentAiDefaults.model,
+  voice: process.env.EDGE_TTS_VOICE || DEFAULT_TTS_SETTINGS.voice,
   speed: 1,
   resolution: "1440x800",
   fps: 30,
@@ -150,10 +166,11 @@ export function settings() {
   const p = path.join(ROOT, "settings.json");
   if (!fs.existsSync(p)) return { ...defaults };
   try {
-    return {
+    const loaded = {
       ...defaults,
       ...JSON.parse(fs.readFileSync(p, "utf8")),
     };
+    return { ...loaded, ...normalizeAiSettings(loaded) };
   } catch {
     return { ...defaults };
   }
@@ -165,7 +182,9 @@ export function saveSettings(s: any) {
   delete safe.openaiApiKey;
   delete safe.groqApiKey;
   delete safe.geminiApiKey;
-  safe.provider = ["groq", "gemini"].includes(safe.provider) ? safe.provider : "groq";
+  delete safe.groqConfigured;
+  delete safe.geminiConfigured;
+  Object.assign(safe, normalizeAiSettings(safe));
   safe.speed = Math.min(2, Math.max(0.5, Number(safe.speed) || 1));
   safe.fps = Math.min(60, Math.max(24, Number(safe.fps) || 30));
   safe.quality = ["low", "medium", "high"].includes(safe.quality) ? safe.quality : defaults.quality;

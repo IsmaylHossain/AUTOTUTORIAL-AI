@@ -1,1 +1,27 @@
-import {NextResponse} from "next/server";import {generateTTS} from "../../../lib/tts";export const runtime="nodejs";export async function POST(req:Request){try{const {id,index}=await req.json();if(!id||!Number.isInteger(Number(index))||Number(index)<0)return NextResponse.json({ok:false,error:"Invalid tutorial or step index."},{status:400});const audio=await generateTTS(id,Number(index));if(!audio)return NextResponse.json({ok:false,error:"Narration is not configured. Add GROQ_API_KEY or use the macOS say fallback, then retry."},{status:503});return NextResponse.json({ok:true,audio})}catch(e:any){const msg=String(e?.message||'Voice generation failed.');const status=/not configured|empty|fallback|not available/i.test(msg)?503:500;return NextResponse.json({ok:false,error:msg},{status})}}
+import { NextResponse } from "next/server";
+import { generateTTS } from "../../../lib/tts";
+import { get } from "../../../lib/store";
+
+export const runtime = "nodejs";
+
+export async function POST(request: Request) {
+  try {
+    const { id, index } = await request.json();
+    if (!id || !Number.isInteger(Number(index)) || Number(index) < 0)
+      return NextResponse.json(
+        { ok: false, error: "Invalid tutorial or step index." },
+        { status: 400 },
+      );
+    const audio = await generateTTS(id, Number(index));
+    const tutorial = get(id);
+    return NextResponse.json({
+      ok: true,
+      audio,
+      source: tutorial?.steps[Number(index)]?.voiceSource || "edge",
+    });
+  } catch (error: any) {
+    const message = String(error?.message || "Voice generation failed.");
+    const status = /not configured|empty|API key/i.test(message) ? 503 : 500;
+    return NextResponse.json({ ok: false, error: message }, { status });
+  }
+}

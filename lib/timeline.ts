@@ -7,6 +7,8 @@ export type TimelineAction = {
   ts: number;
   activeMs?: number;
   screenshotMs?: number;
+  screenshot?: string;
+  interactionTs?: number;
   x?: number;
   y?: number;
   text?: string;
@@ -18,6 +20,7 @@ export type TimelineAction = {
   viewportHeight?: number;
   targetRect?: { x: number; y: number; width: number; height: number };
   sensitive?: boolean;
+  pickerOpen?: boolean;
 };
 export type Timeline = {
   version: 3;

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import fs from "fs";
 import path from "path";
 import { dir, get } from "../../../lib/store";
+import { normalizeWavHeader } from "../../../lib/media";
 export const runtime = "nodejs";
 function typeFor(file: string) {
   const ext = path.extname(file).toLowerCase();
@@ -35,6 +36,7 @@ export async function GET(req: Request) {
       ].filter(Boolean) as string[];
     const file = fallbacks.find((x) => fs.existsSync(x));
     if (!file) return new NextResponse("Audio not found", { status: 404 });
+    normalizeWavHeader(file);
     const stat = fs.statSync(file),
       size = stat.size,
       range = req.headers.get("range"),
@@ -45,7 +47,7 @@ export async function GET(req: Request) {
       };
     if (!range) {
       headers["Content-Length"] = String(size);
-      return new Response(fs.createReadStream(file) as any, { headers });
+      return new Response(fs.readFileSync(file) as any, { headers });
     }
     const m = /bytes=(\d*)-(\d*)/.exec(range);
     if (!m) return new NextResponse("Invalid range", { status: 416 });
@@ -55,7 +57,8 @@ export async function GET(req: Request) {
       return new NextResponse("Range not satisfiable", { status: 416 });
     headers["Content-Length"] = String(end - start + 1);
     headers["Content-Range"] = `bytes ${start}-${end}/${size}`;
-    return new Response(fs.createReadStream(file, { start, end }) as any, {
+    const bytes = fs.readFileSync(file).subarray(start, end + 1);
+    return new Response(bytes as any, {
       status: 206,
       headers,
     });

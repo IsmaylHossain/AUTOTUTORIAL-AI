@@ -2,12 +2,18 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ArrowRight, CheckCircle2, Link2, ShieldCheck, Sparkles } from "lucide-react";
+import {
+  AI_PROVIDERS,
+  AiProvider,
+  DEFAULT_AI_SETTINGS,
+  defaultsForProvider,
+  TEXT_MODELS,
+  TTS_MODELS,
+  voicesFor,
+} from "../lib/ai-options";
 
 const DEFAULT_SETTINGS = {
-  provider: "groq",
-  model: "llama-3.3-70b-versatile",
-  voice: "hannah",
-  ttsModel: "canopylabs/orpheus-v1-english",
+  ...DEFAULT_AI_SETTINGS,
   speed: 1,
   resolution: "1440x800",
   fps: 30,
@@ -19,7 +25,7 @@ export default function Home() {
   const router = useRouter();
   const [url, setUrl] = useState("");
   const [projectName, setProjectName] = useState("");
-  const [settings, setSettings] = useState(DEFAULT_SETTINGS);
+  const [settings, setSettings] = useState<any>(DEFAULT_SETTINGS);
   const [health, setHealth] = useState<any>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -44,6 +50,13 @@ export default function Home() {
       setError("Enter a project name.");
       return;
     }
+    const providerReady = settings.provider === "gemini"
+      ? health?.geminiConfigured
+      : health?.groqConfigured;
+    if (!providerReady) {
+      setError(`Add a ${settings.provider === "gemini" ? "Gemini" : "Groq"} API key in Settings before recording.`);
+      return;
+    }
     setBusy(true);
     const response = await fetch("/api/record/start", {
       method: "POST",
@@ -58,6 +71,24 @@ export default function Home() {
     }
     router.push(`/record/${data.id}`);
   }
+
+  function changeProvider(provider: AiProvider) {
+    setSettings({ ...settings, ...defaultsForProvider(provider) });
+  }
+
+  function changeTtsModel(ttsModel: string) {
+    const voices = voicesFor();
+    setSettings({
+      ...settings,
+      ttsModel,
+      voice: voices.some((item) => item.value === settings.voice)
+        ? settings.voice
+        : voices[0].value,
+    });
+  }
+
+  const provider = settings.provider as AiProvider;
+  const voiceOptions = voicesFor();
 
   return (
     <div className="max-w-6xl mx-auto px-8 py-12">
@@ -78,11 +109,13 @@ export default function Home() {
             </div>
           </div>
           <div className="grid grid-cols-2 gap-3">
-            <label className="text-sm muted">AI provider<select className="input mt-1" value={settings.provider} onChange={(event) => setSettings({ ...settings, provider: event.target.value })}><option value="groq">Groq</option><option value="gemini">Gemini</option></select></label>
+            <label className="text-sm muted">AI provider<select className="input mt-1" value={provider} onChange={(event) => changeProvider(event.target.value as AiProvider)}>{AI_PROVIDERS.map((item) => <option value={item.value} key={item.value}>{item.label}</option>)}</select></label>
+            <label className="text-sm muted">Text model<select className="input mt-1" value={settings.model} onChange={(event) => setSettings({ ...settings, model: event.target.value })}>{TEXT_MODELS[provider].map((item) => <option value={item.value} key={item.value}>{item.label}</option>)}</select></label>
+            <label className="text-sm muted">Voice model<select className="input mt-1" value={settings.ttsModel} onChange={(event) => changeTtsModel(event.target.value)}>{TTS_MODELS.map((item) => <option value={item.value} key={item.value}>{item.label}</option>)}</select></label>
+            <label className="text-sm muted">Voice<select className="input mt-1" value={settings.voice} onChange={(event) => setSettings({ ...settings, voice: event.target.value })}>{voiceOptions.map((item) => <option value={item.value} key={item.value}>{item.label}</option>)}</select></label>
             <label className="text-sm muted">Screen size<select className="input mt-1" value={settings.resolution} onChange={(event) => setSettings({ ...settings, resolution: event.target.value })}><option value="1920x1080">Full HD 16:9</option><option value="1280x720">HD 16:9</option><option value="1440x800">Laptop 16:9</option><option value="1440x900">Laptop 16:10</option><option value="1080x1080">Square 1:1</option></select></label>
             <label className="text-sm muted">FPS<input className="input mt-1" type="number" min="24" max="60" value={settings.fps} onChange={(event) => setSettings({ ...settings, fps: Number(event.target.value) })} /></label>
             <label className="text-sm muted">Video quality<select className="input mt-1" value={settings.quality} onChange={(event) => setSettings({ ...settings, quality: event.target.value })}><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select></label>
-            <label className="text-sm muted">Voice model<input className="input mt-1" value={settings.voice} onChange={(event) => setSettings({ ...settings, voice: event.target.value })} /></label>
           </div>
         </div>
         {error && <div className="text-sm text-red-400 mt-4">{error}</div>}

@@ -1,354 +1,665 @@
 import fs from "fs";
 import path from "path";
 import Groq from "groq-sdk";
-import { get, save, dir, Step, settings } from "./store";
+import { dir, get, save, settings, Step, Tutorial } from "./store";
 import { generateTTS } from "./tts";
 import { INTRO_DURATION_MS } from "./timeline";
+import { normalizeAiSettings } from "./ai-options";
+
+type AiConfig = ReturnType<typeof tutorialAiSettings>;
+
+function tutorialAiSettings(tutorial: Tutorial) {
+  const merged = { ...settings(), ...(tutorial.settings || {}) };
+  return { ...merged, ...normalizeAiSettings(merged) };
+}
+
+function providerName(config: AiConfig) {
+  return config.provider === "gemini" ? "Gemini" : "Groq";
+}
 
 function parseJson(text: string) {
   try {
     return JSON.parse(text);
   } catch {}
-  const m = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
-  if (m)
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  if (fenced) {
     try {
-      return JSON.parse(m[1]);
+      return JSON.parse(fenced[1]);
     } catch {}
-  const a = text.indexOf("{"),
-    b = text.lastIndexOf("}");
-  if (a >= 0 && b > a)
+  }
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start >= 0 && end > start) {
     try {
-      return JSON.parse(text.slice(a, b + 1));
+      return JSON.parse(text.slice(start, end + 1));
     } catch {}
-  return {};
+  }
+  throw new Error("AI returned invalid JSON.");
 }
-function localSteps(meaningful: any[]): Step[] {
-  return meaningful.map((a: any, i: number) => ({
-    title: titleFor(a),
-    instruction: instructionFor(a),
-    startMs: Number(a.activeMs ?? 0),
-    endMs: Number(a.activeMs ?? 0) + 1500,
-    action: a.type,
-    selector: a.selector,
-    value:
-      a.type === "input" || a.type === "select"
-        ? undefined
-        : a.sensitive
-          ? "[protected]"
-          : a.value,
-    actionIndex: i,
-  }));
-}
-async function aiText(prompt: string) {
-  const cfg = settings();
-  if (cfg.provider === "gemini") {
+
+async function requestAiJson<T>(
+  prompt: string,
+  config: AiConfig,
+  schema: Record<string, unknown>,
+): Promise<T> {
+  if (config.provider === "gemini") {
     const key = process.env.GEMINI_API_KEY?.trim();
-    if (!key) throw new Error("Gemini API key is not configured. Add GEMINI_API_KEY to .env.local.");
+    if (!key)
+      throw new Error(
+        "Gemini API key is not configured. Add it in Settings.",
+      );
     const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(cfg.model || "gemini-2.5-flash")}:generateContent?key=${encodeURIComponent(key)}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(config.model)}:generateContent`,
       {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": key,
+        },
         body: JSON.stringify({
+          systemInstruction: {
+            parts: [
+              {
+                text: "Create faithful tutorial copy from observed browser actions. Preserve each action type: clicks must never become data entry. Never invent controls, actions, selectors, or values. Never expose secrets or entered field values.",
+              },
+            ],
+          },
           contents: [{ role: "user", parts: [{ text: prompt }] }],
-          generationConfig: { temperature: 0.1, responseMimeType: "application/json" },
+          generationConfig: {
+            temperature: 0.2,
+            responseFormat: {
+              text: { mimeType: "APPLICATION_JSON", schema },
+            },
+          },
         }),
       },
     );
-    if (!response.ok) throw new Error(`Gemini analysis request failed (${response.status}).`);
-    const body = await response.json() as any;
-    return body.candidates?.[0]?.content?.parts?.map((p: any) => p.text).join("\n") || "";
+    const raw = await response.text();
+    if (!response.ok) {
+      let detail = "";
+      try {
+        detail = JSON.parse(raw)?.error?.message || "";
+      } catch {}
+      throw new Error(
+        `Gemini request failed (${response.status})${detail ? `: ${detail}` : "."}`,
+      );
+    }
+    const body = JSON.parse(raw);
+    const text = body.candidates?.[0]?.content?.parts
+      ?.map((part: any) => part.text || "")
+      .join("\n")
+      .trim();
+    if (!text)
+      throw new Error(
+        `Gemini returned no text${body.promptFeedback?.blockReason ? `: ${body.promptFeedback.blockReason}` : "."}`,
+      );
+    return parseJson(text) as T;
   }
+
   const key = process.env.GROQ_API_KEY?.trim();
-  if (!key) throw new Error("Groq API key is not configured. Add GROQ_API_KEY to .env.local.");
+  if (!key)
+    throw new Error("Groq API key is not configured. Add it in Settings.");
   const client = new Groq({ apiKey: key });
-  const model = cfg.model || "llama-3.3-70b-versatile";
-  const r = await client.chat.completions.create({
-    model,
+  const response = await client.chat.completions.create({
+    model: config.model,
     messages: [
       {
         role: "system",
         content:
-          "Return only valid JSON. Be completely faithful to observed browser actions. Never invent actions, selectors, values, or UI. Preserve every meaningful action in order. Never reveal protected secrets.",
+          "Return only valid JSON. Create faithful tutorial copy from observed browser actions. Preserve each action type: clicks must never become data entry. Never invent controls, actions, selectors, or values. Never expose secrets or entered field values.",
       },
       { role: "user", content: prompt },
     ],
-    temperature: 0.1,
+    response_format: { type: "json_object" },
   });
-  return r.choices[0]?.message?.content || "";
+  const text = response.choices[0]?.message?.content?.trim();
+  if (!text) throw new Error("Groq returned no text.");
+  return parseJson(text) as T;
 }
-export async function analyze(id: string) {
-  const t = get(id);
-  if (!t) throw new Error("Tutorial not found");
-  t.stage = "analyzing";
-  t.progress = 10;
-  t.message = "Understanding your demonstration with Groq…";
-  save(t);
-  const actionsPath = path.join(dir(id), "actions.json");
-  const raw = fs.existsSync(actionsPath)
-    ? fs.readFileSync(actionsPath, "utf8").trim()
-    : "";
-  const actions = raw
-    ? raw
-        .split(/\r?\n/)
-        .filter(Boolean)
-        .map((x) => JSON.parse(x))
-        .filter(
-          (a: any) =>
-            a && typeof a.type === "string" && Number.isFinite(Number(a.ts)),
-        )
-    : [];
-  const meaningful = actions
-    .filter((a: any) =>
-      ["click", "input", "select", "change", "navigation"].includes(a.type),
-    )
-    .map((a: any) =>
-      ["input", "select", "change"].includes(a.type)
-        ? { ...a, value: undefined, selectedText: undefined }
-        : a,
+
+function readActions(id: string) {
+  const file = path.join(dir(id), "actions.json");
+  if (!fs.existsSync(file)) return [];
+  return fs
+    .readFileSync(file, "utf8")
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map((line) => JSON.parse(line))
+    .filter(
+      (action: any) =>
+        action &&
+        typeof action.type === "string" &&
+        Number.isFinite(Number(action.ts)),
     );
-  if (!meaningful.length) {
-    t.status = "review";
-    t.stage = "review";
-    t.progress = 0;
-    t.message = actions.length
-      ? "The recording contains events, but no meaningful click/input/change/navigation actions were captured."
-      : "No usable actions were captured. Please re-record the demonstration.";
-    save(t);
-    return t;
-  }
-  const prompt = `Convert only these observed browser actions into tutorial steps. Return JSON {"steps":[{"title":"","instruction":"","startMs":0,"endMs":0,"action":"","selector":"","actionIndex":0}]}. Preserve every meaningful action in order, one step per meaningful action. Never invent UI. Never include typed text, selected options, or any field values. For input actions, say to enter the required information into the observed field label. For select actions, say to choose an option from the field label. For checkbox/radio changes, describe the control by its label and kind only. Actions:\n${JSON.stringify(meaningful)}`;
-  let aiSteps: any[] = [];
-  let usedLocal = false;
-  try {
-    const content = await aiText(prompt);
-    if (content) {
-      const obj = parseJson(content);
-      aiSteps = Array.isArray(obj.steps) ? obj.steps : [];
-    }
-  } catch (e: any) {
-    usedLocal = true;
-    t.message = `${settings().provider === "gemini" ? "Gemini" : "Groq"} unavailable; using local step generation. ${e?.message || ""}`;
-    save(t);
-  }
-  const local = localSteps(meaningful);
-  const intro: Step = {
-    title: "Introduction",
-    instruction: `Welcome to ${t.name}.`,
-    startMs: 0,
-    endMs: INTRO_DURATION_MS,
-    action: "introduction",
-  };
-  const steps: Step[] = [
-    intro,
-    ...local.map((fallback: any, i: number) => {
-      const action = meaningful[i];
-      const s = aiSteps[i] || {};
-      const actionStart = Number.isFinite(Number(action.activeMs))
-        ? Number(action.activeMs)
-        : fallback.startMs;
-      const start = actionStart + INTRO_DURATION_MS;
-      const actionEnd =
-        Number(s.endMs) > actionStart
-          ? Number(s.endMs) + INTRO_DURATION_MS
-          : fallback.endMs + INTRO_DURATION_MS;
-      const instruction =
-        action.type === "input"
-          ? `Enter the required information in ${action.fieldLabel || "the selected text field"}.`
-          : action.type === "select"
-            ? `Choose an option from ${action.fieldLabel || "the dropdown"}.`
-            : action.type === "change"
-              ? `${action.fieldKind === "radio" ? "Select the radio option" : action.fieldKind === "checkbox" ? "Toggle the checkbox" : "Change the control"}${action.fieldLabel ? ` for ${action.fieldLabel}` : ""}.`
-              : String(s.instruction || fallback.instruction);
-      const title =
-        action.type === "input"
-          ? `Enter information in ${action.fieldLabel || "the text field"}`
-          : action.type === "select"
-            ? `Choose an option from ${action.fieldLabel || "the dropdown"}`
-            : action.type === "change"
-              ? `${action.fieldKind === "radio" ? "Select radio option" : action.fieldKind === "checkbox" ? "Toggle checkbox" : "Change control"}${action.fieldLabel ? ` · ${action.fieldLabel}` : ""}`
-              : String(s.title || fallback.title);
-      return {
-        title,
-        instruction,
-        startMs: start,
-        endMs: Math.max(start + 900, actionEnd),
-        action: action.type,
-        selector: action.selector,
-        value: ["input", "select", "change"].includes(action.type)
-          ? undefined
-          : action.sensitive
-            ? "[protected]"
-            : s.value,
-        actionIndex: i,
-      };
-    }),
-  ];
-  t.steps = steps;
-  t.stage = "narrating";
-  t.status = "processing";
-  t.progress = 50;
-  t.message = `${usedLocal ? "Using local" : "Creating"} narration for ${steps.length} steps…`;
-  save(t);
-  for (let i = 0; i < t.steps.length; i++) {
-    const current = get(id);
-    if (!current) throw new Error("Tutorial not found");
-    current.stage = "narrating";
-    current.status = "processing";
-    current.progress = 50 + Math.round((i / Math.max(1, t.steps.length)) * 40);
-    current.message = `Generating narration ${i + 1} of ${t.steps.length}…`;
-    save(current);
-    try {
-      await generateTTS(id, i);
-    } catch (e: any) {
-      const latest = get(id);
-      if (latest) {
-        latest.message = `Narration ${i + 1} unavailable; you can retry it from review.`;
-        save(latest);
-      }
-    }
-  }
-  const done = get(id)!;
-  done.stage = "steps";
-  done.progress = 90;
-  done.status = "review";
-  done.message = `${actions.length} captured events · ${steps.length} meaningful tutorial steps`;
-  save(done);
-  return done;
 }
+
+function meaningfulActions(actions: any[]) {
+  const types = ["click", "input", "select", "change", "navigation"];
+  return actions.flatMap((action: any, sourceIndex: number) => {
+      if (!types.includes(action.type)) return [];
+      const safe = { ...action };
+      delete safe.value;
+      delete safe.selectedText;
+      if (safe.sensitive) safe.text = "[protected control]";
+      if (safe.type === "click") {
+        for (let index = sourceIndex + 1; index < actions.length; index++) {
+          const candidate = actions[index];
+          if (candidate?.url && candidate.url !== action.url) {
+            safe.resultUrl = candidate.url;
+            safe.resultTitle = candidate.title;
+            break;
+          }
+          if (types.includes(candidate?.type)) break;
+        }
+      }
+      return [safe];
+    });
+}
+
+const copySchema = {
+  type: "object",
+  properties: {
+    title: { type: "string" },
+    instruction: { type: "string" },
+  },
+  required: ["title", "instruction"],
+  additionalProperties: false,
+};
+
+function tutorialSchema(stepCount: number) {
+  return {
+    type: "object",
+    properties: {
+      introduction: copySchema,
+      steps: {
+        type: "array",
+        minItems: stepCount,
+        maxItems: stepCount,
+        items: copySchema,
+      },
+    },
+    required: ["introduction", "steps"],
+    additionalProperties: false,
+  };
+}
+
+function validatedCopy(value: any, label: string) {
+  const title = String(value?.title || "").trim().slice(0, 140);
+  const instruction = String(value?.instruction || "").trim().slice(0, 500);
+  if (!title || !instruction)
+    throw new Error(`AI omitted the ${label} title or instruction.`);
+  return { title, instruction };
+}
+
+function cleanLabel(value: unknown, fallback: string) {
+  const text = String(value || "")
+    .replace(/\s+/g, " ")
+    .replace(/[<>]/g, "")
+    .replace(/\s*[*:]+\s*$/, "")
+    .trim();
+  return text && text !== "[protected control]" ? text.slice(0, 90) : fallback;
+}
+
+function sentenceLabel(value: string) {
+  if (!value || value.startsWith("the ")) return value;
+  return value.charAt(0).toLowerCase() + value.slice(1);
+}
+
+function withArticle(value: string) {
+  const label = sentenceLabel(value);
+  return /^(the|a|an)\s/i.test(label) ? label : `the ${label}`;
+}
+
+function selectorSuggests(action: any, pattern: RegExp) {
+  return pattern.test(
+    `${action.selector || ""} ${action.controlRole || ""} ${action.controlLabel || ""}`,
+  );
+}
+
+function isCalendarAction(action: any) {
+  return selectorSuggests(
+    action,
+    /calendar|datepicker|date-picker|dp--|flatpickr|react-datepicker/i,
+  );
+}
+
+function isOptionAction(action: any) {
+  return selectorSuggests(
+    action,
+    /(^|[.\s>_-])li([.\s>_-]|$)|menuitem|option|dropdown-item|listbox/i,
+  );
+}
+
+function isButtonAction(action: any, label: string) {
+  return (
+    selectorSuggests(action, /button|submit|btn/i) ||
+    /^(submit|save|create|add|cancel|delete|remove|close|login|sign in|next|back|finish|confirm|apply|update|continue)$/i.test(
+      label,
+    )
+  );
+}
+
+function isFieldLike(label: string) {
+  return /name|category|unit|date|status|supplier|customer|type|quantity|price|reference|description|email|password|address|country|city|phone/i.test(
+    label,
+  );
+}
+
+function actionControl(action: any) {
+  const selector = String(action.selector || "");
+  const fallback = /xmark|close/i.test(selector)
+    ? "Close"
+    : /submit/i.test(selector)
+      ? "Submit"
+      : "the highlighted control";
+  return cleanLabel(
+    action.controlLabel || action.text || action.ariaLabel,
+    fallback,
+  );
+}
+
+function localActionCopy(action: any, index = 0, actions: any[] = []) {
+  const field = cleanLabel(action.fieldLabel, "selected field");
+  const control = cleanLabel(
+    action.controlLabel || action.text || action.ariaLabel,
+    actionControl(action),
+  );
+  const previous = index > 0 ? actions[index - 1] : undefined;
+  const next = index + 1 < actions.length ? actions[index + 1] : undefined;
+  const previousControl = previous ? actionControl(previous) : "";
+  const contextField = cleanLabel(action.contextLabel, "");
+
+  if (action.pickerOpen)
+    return {
+      title: `Open ${field} picker`,
+      instruction: `Open ${withArticle(field)} date picker.`,
+    };
+
+  if (action.type === "input")
+    return {
+      title: `Enter ${field}`,
+      instruction: `Enter ${withArticle(field)}.`,
+    };
+  if (action.type === "select")
+    return {
+      title: `Choose ${field}`,
+      instruction: `Choose an option from ${withArticle(field)}.`,
+    };
+  if (action.type === "change") {
+    if (action.fieldKind === "checkbox")
+      return {
+        title: `Set ${field}`,
+        instruction: `Set ${withArticle(field)} checkbox as required.`,
+      };
+    if (action.fieldKind === "radio")
+      return {
+        title: `Choose ${field}`,
+        instruction: `Choose an option for ${withArticle(field)}.`,
+      };
+    if (/date|time|month|week/.test(action.fieldKind || ""))
+      return {
+        title: `Select ${field}`,
+        instruction: `Select ${withArticle(field)}.`,
+      };
+    return {
+      title: `Update ${field}`,
+      instruction: `Update ${withArticle(field)}.`,
+    };
+  }
+  if (action.type === "navigation") {
+    const destination = cleanLabel(action.title, "next page");
+    return {
+      title: `Go to ${destination}`,
+      instruction: `Go to ${withArticle(destination)}.`,
+    };
+  }
+  if (isCalendarAction(action)) {
+    const dateField = isFieldLike(contextField)
+      ? contextField
+      : isFieldLike(previousControl)
+        ? previousControl
+        : "date";
+    return {
+      title: `Select ${dateField}`,
+      instruction: `Select ${withArticle(dateField)}.`,
+    };
+  }
+  if (isOptionAction(action)) {
+    const optionField = isFieldLike(contextField)
+      ? contextField
+      : previous && isFieldLike(previousControl)
+        ? previousControl
+        : "";
+    if (optionField)
+      return {
+        title: `Choose ${optionField}`,
+        instruction: `Choose an option for ${withArticle(optionField)}.`,
+      };
+    return {
+      title: `Select ${control}`,
+      instruction: `Select ${control}.`,
+    };
+  }
+  if (next && isOptionAction(next) && isFieldLike(control))
+    return {
+      title: `Open ${control}`,
+      instruction: `Open ${withArticle(control)} list.`,
+    };
+  if (isButtonAction(action, control))
+    return {
+      title: `Click ${control}`,
+      instruction: `Click ${withArticle(control)} button.`,
+    };
+  if (action.resultUrl)
+    return {
+      title: `Go to ${control}`,
+      instruction: `Go to ${withArticle(control)}.`,
+    };
+  return {
+    title: `Click ${control}`,
+    instruction: `Click ${withArticle(control)}.`,
+  };
+}
+
+function localTutorialCopy(tutorial: Tutorial, actions: any[]) {
+  return {
+    introduction: {
+      title: `Getting started with ${tutorial.name}`,
+      instruction: `This guide walks through ${tutorial.name} using the recorded workflow, with each action presented in order.`,
+    },
+    steps: actions.map(localActionCopy),
+  };
+}
+
+function standardizeGeneratedCopy(
+  copy: { title: string; instruction: string },
+  action: any,
+  index: number,
+  actions: any[],
+  projectName: string,
+) {
+  const validated = validatedCopy(copy, `step ${index + 1}`);
+  const local = localActionCopy(action, index, actions);
+  const combined = `${validated.title} ${validated.instruction}`.toLowerCase();
+  const project = projectName.trim().toLowerCase();
+  const control = actionControl(action).toLowerCase();
+  const expectedVerb = local.title.split(/\s+/)[0].toLowerCase();
+  const titleVerb = validated.title.split(/\s+/)[0].toLowerCase();
+  const instructionVerb = validated.instruction.split(/\s+/)[0].toLowerCase();
+  const verbMismatch =
+    titleVerb !== expectedVerb || instructionVerb !== expectedVerb;
+  const hasWrongVerb =
+    (action.type === "click" && /\b(enter|fill|type|provide)\b/.test(combined)) ||
+    (action.type === "input" && /\b(click|select|choose|open|go to)\b/.test(combined));
+  const vague =
+    /recorded workflow|workflow requirements|to continue with|continue with the project|proceed with the project/.test(
+      combined,
+    );
+  const repeatsProject =
+    !!project && combined.includes(project) && !control.includes(project);
+  return verbMismatch || hasWrongVerb || vague || repeatsProject || isCalendarAction(action)
+    ? local
+    : validated;
+}
+
+function actionForPrompt(action: any, index: number, actions: any[]) {
+  const local = localActionCopy(action, index, actions);
+  return {
+    stepNumber: index + 1,
+    type: action.type,
+    expectedVerb: local.title.split(/\s+/)[0],
+    control: actionControl(action),
+    field: cleanLabel(action.fieldLabel, ""),
+    fieldKind: action.fieldKind || "",
+    elementRole: action.controlRole || "",
+    contextField: cleanLabel(action.contextLabel, ""),
+    isMenuOption: isOptionAction(action),
+    isDateSelection: isCalendarAction(action),
+    opensDatePicker: !!action.pickerOpen,
+    navigatesTo: action.resultTitle || "",
+  };
+}
+
+function markFailed(id: string, error: unknown) {
+  const tutorial = get(id);
+  if (!tutorial) return;
+  tutorial.status = "failed";
+  tutorial.stage = "failed";
+  tutorial.progress = 0;
+  tutorial.message =
+    error instanceof Error ? error.message : "AI generation failed.";
+  save(tutorial);
+}
+
+export async function analyze(id: string) {
+  const tutorial = get(id);
+  if (!tutorial) throw new Error("Tutorial not found");
+  const config = tutorialAiSettings(tutorial);
+  tutorial.stage = "analyzing";
+  tutorial.status = "processing";
+  tutorial.progress = 10;
+  tutorial.message = `Generating tutorial text with ${providerName(config)} · ${config.model}…`;
+  save(tutorial);
+
+  const actions = readActions(id);
+  const meaningful = meaningfulActions(actions);
+  if (!meaningful.length) {
+    tutorial.status = "review";
+    tutorial.stage = "review";
+    tutorial.progress = 0;
+    tutorial.message = actions.length
+      ? "The recording contains events, but no meaningful actions were captured."
+      : "No usable actions were captured. Please re-record the demonstration.";
+    save(tutorial);
+    return tutorial;
+  }
+
+  try {
+    const prompt = [
+      `Project: ${tutorial.name}`,
+      `Website: ${tutorial.url}`,
+      "Generate a brief introduction plus exactly one tutorial step for each observed action.",
+      "Write each title in 2-7 words and each instruction as one short imperative sentence.",
+      "Match the observed action exactly: use Go to for navigation, Click for buttons, Enter for text inputs, Choose for dropdown fields, and Select for menu options or dates.",
+      "Examples: Go to the Products section. Click Actions. Select Create Product. Enter the product name. Choose a product category. Select the unit. Select the order date. Click the Submit button. Click the Cancel button.",
+      "Never use Enter, Fill, Type, or Provide for a click action.",
+      "Never mention the project name inside an action step.",
+      "Never add filler such as 'to continue', 'recorded workflow', 'workflow requirements', or 'review it before continuing'.",
+      "For input, select, and change actions, name the observed field without revealing entered values or sensitive data.",
+      `Return exactly ${meaningful.length} items in steps, in the same order as the actions.`,
+      `Observed actions: ${JSON.stringify(meaningful.map(actionForPrompt))}`,
+    ].join("\n");
+    let usedLocalText = false;
+    let generated: {
+      introduction: { title: string; instruction: string };
+      steps: { title: string; instruction: string }[];
+    };
+    try {
+      generated = await requestAiJson(prompt, config, tutorialSchema(meaningful.length));
+      if (!Array.isArray(generated.steps) || generated.steps.length !== meaningful.length)
+        throw new Error(
+          `AI returned ${generated.steps?.length || 0} steps for ${meaningful.length} actions.`,
+        );
+      validatedCopy(generated.introduction, "introduction");
+      generated.steps = generated.steps.map((step, index) =>
+        standardizeGeneratedCopy(
+          step,
+          meaningful[index],
+          index,
+          meaningful,
+          tutorial.name,
+        ),
+      );
+    } catch (error: any) {
+      usedLocalText = true;
+      generated = localTutorialCopy(tutorial, meaningful);
+      tutorial.message = `Cloud text unavailable; using professional local templates. ${error?.message || ""}`;
+      save(tutorial);
+    }
+
+    const introCopy = validatedCopy(generated.introduction, "introduction");
+    const steps: Step[] = [
+      {
+        ...introCopy,
+        startMs: 0,
+        endMs: INTRO_DURATION_MS,
+        action: "introduction",
+        textSource: usedLocalText ? "local" : "ai",
+      },
+      ...meaningful.map((action: any, index: number): Step => {
+        const copy = validatedCopy(generated.steps[index], `step ${index + 1}`);
+        const actionStart = Math.max(0, Number(action.activeMs) || 0);
+        const startMs = actionStart + INTRO_DURATION_MS;
+        return {
+          ...copy,
+          startMs,
+          endMs: startMs + 1500,
+          action: action.type,
+          selector: action.selector,
+          value: action.sensitive ? "[protected]" : undefined,
+          actionIndex: index,
+          textSource: usedLocalText ? "local" : "ai",
+        };
+      }),
+    ];
+
+    tutorial.steps = steps;
+    tutorial.stage = "narrating";
+    tutorial.progress = 50;
+    tutorial.message = `Generating ${steps.length} narration segments with Microsoft Edge Neural TTS or the local system voice…`;
+    save(tutorial);
+
+    for (let index = 0; index < steps.length; index++) {
+      const current = get(id);
+      if (!current) throw new Error("Tutorial not found");
+      current.stage = "narrating";
+      current.status = "processing";
+      current.progress = 50 + Math.round((index / Math.max(1, steps.length)) * 40);
+      current.message = `Generating narration ${index + 1} of ${steps.length} · Microsoft Edge · ${config.voice}…`;
+      save(current);
+      await generateTTS(id, index);
+    }
+
+    const done = get(id)!;
+    done.stage = "steps";
+    done.progress = 90;
+    done.status = "review";
+    const localVoiceCount = done.steps.filter((step) => step.voiceSource === "local").length;
+    done.message = `${steps.length} steps ready · text: ${usedLocalText ? "local templates" : providerName(config)} · voice: ${localVoiceCount ? `${localVoiceCount} local fallback segment${localVoiceCount === 1 ? "" : "s"}` : "Microsoft Edge TTS"}.`;
+    save(done);
+    return done;
+  } catch (error) {
+    markFailed(id, error);
+    throw error;
+  }
+}
+
 export function validateTutorialSteps(id: string) {
-  const t = get(id);
-  if (!t) throw new Error("Tutorial not found");
-  const p = path.join(dir(id), "actions.json");
-  const actions = fs.existsSync(p)
-    ? fs
-        .readFileSync(p, "utf8")
-        .split(/\r?\n/)
-        .filter(Boolean)
-        .map((x) => JSON.parse(x))
-        .filter(
-          (a: any) =>
-            a &&
-            ["click", "input", "select", "change", "navigation"].includes(
-              a.type,
-            ) &&
-            Number.isFinite(Number(a.ts)),
-        )
-    : [];
+  const tutorial = get(id);
+  if (!tutorial) throw new Error("Tutorial not found");
+  const actions = meaningfulActions(readActions(id));
   const issues: string[] = [];
-  t.steps = (t.steps || []).map((s: any, i: number) => {
-    if (s.action === "introduction") return s;
-    const action = actions[Number.isInteger(s.actionIndex) ? s.actionIndex : i];
+  tutorial.steps = (tutorial.steps || []).map((step: any, index: number) => {
+    if (step.action === "introduction") return step;
+    const action = actions[
+      Number.isInteger(step.actionIndex) ? step.actionIndex : index - 1
+    ];
     if (!action) {
-      issues.push(`Step ${i + 1} has no matching captured action.`);
-      return s;
+      issues.push(`Step ${index + 1} has no matching captured action.`);
+      return step;
     }
-    if (["input", "select", "change"].includes(action.type))
-      s.value = undefined;
+    step.value = action.sensitive ? "[protected]" : undefined;
     if (
-      !Number.isFinite(Number(s.startMs)) ||
-      !Number.isFinite(Number(s.endMs)) ||
-      Number(s.endMs) < Number(s.startMs)
+      !Number.isFinite(Number(step.startMs)) ||
+      !Number.isFinite(Number(step.endMs)) ||
+      Number(step.endMs) < Number(step.startMs)
     ) {
-      issues.push(`Step ${i + 1} has invalid timing.`);
-      s.startMs = Number(action.activeMs ?? action.ts);
-      s.endMs = s.startMs + 1500;
+      issues.push(`Step ${index + 1} has invalid timing.`);
+      step.startMs = Number(action.activeMs || 0) + INTRO_DURATION_MS;
+      step.endMs = step.startMs + 1500;
     }
-    if (
-      s.value &&
-      /AIza|AQ\.|sk-|ghp_|xox[baprs]-|Bearer\s+/i.test(String(s.value))
-    ) {
-      s.value = "[protected]";
-      issues.push(`Step ${i + 1} contained a redacted secret pattern.`);
-    }
-    return s;
+    return step;
   });
-  save(t);
+  save(tutorial);
   return {
     ok: issues.length === 0,
     issues,
     actions: actions.length,
-    steps: t.steps.length,
+    steps: tutorial.steps.length,
   };
 }
+
 export async function regenerateStep(id: string, index: number) {
-  const t = get(id);
-  if (!t) throw new Error("Tutorial not found");
-  if (index < 0 || index >= t.steps.length) throw new Error("Step not found");
-  const step = t.steps[index];
-  if (step.action === "introduction") return step;
-  const p = path.join(dir(id), "actions.json");
-  const actions = fs.existsSync(p)
-    ? fs
-        .readFileSync(p, "utf8")
-        .split(/\r?\n/)
-        .filter(Boolean)
-        .map((x) => JSON.parse(x))
-        .filter(
-          (a: any) =>
-            a &&
-            ["click", "input", "select", "change", "navigation"].includes(
-              a.type,
-            ) &&
-            Number.isFinite(Number(a.ts)),
-        )
-    : [];
-  const rawActionIndex = step.actionIndex;
-  const actionIndex =
-    typeof rawActionIndex === "number" && Number.isInteger(rawActionIndex)
-      ? rawActionIndex
-      : index;
-  const a = actions[actionIndex] || actions[index];
-  if (!a) throw new Error("No captured action is available for this step.");
-  const safeAction = ["input", "select", "change"].includes(a.type)
-    ? { ...a, value: undefined, selectedText: undefined }
-    : a;
-  const prompt = `Rewrite one tutorial step using only this observed action. Return JSON {"title":"...","instruction":"..."}. Never invent UI or values. Never include text typed into a field or selected option. Action: ${JSON.stringify(safeAction)}`;
-  let obj: any = { title: titleFor(a), instruction: instructionFor(a) };
+  const tutorial = get(id);
+  if (!tutorial) throw new Error("Tutorial not found");
+  if (index < 0 || index >= tutorial.steps.length)
+    throw new Error("Step not found");
+  const config = tutorialAiSettings(tutorial);
+  const step = tutorial.steps[index];
+  let prompt: string;
+  if (step.action === "introduction") {
+    prompt = `Write a concise tutorial introduction for project ${JSON.stringify(tutorial.name)} at ${JSON.stringify(tutorial.url)}. Return title and instruction. Do not invent workflow details.`;
+  } else {
+    const actions = meaningfulActions(readActions(id));
+    const actionIndex = Number.isInteger(step.actionIndex)
+      ? Number(step.actionIndex)
+      : index - 1;
+    const action = actions[actionIndex];
+    if (!action) throw new Error("No captured action is available for this step.");
+    const context = {
+      previous:
+        actionIndex > 0
+          ? actionForPrompt(actions[actionIndex - 1], actionIndex - 1, actions)
+          : null,
+      current: actionForPrompt(action, actionIndex, actions),
+      next:
+        actionIndex + 1 < actions.length
+          ? actionForPrompt(actions[actionIndex + 1], actionIndex + 1, actions)
+          : null,
+    };
+    prompt = `Rewrite only the current action as one concise tutorial step. Return title and one imperative instruction. Start both with the current action's expectedVerb. Never say "to continue" or mention the project name. Never include entered values or sensitive data. Context: ${JSON.stringify(context)}`;
+  }
+  let generated: { title: string; instruction: string };
+  let textSource: "ai" | "local" = "ai";
   try {
-    const content = await aiText(prompt);
-    if (content) obj = { ...obj, ...parseJson(content) };
-  } catch {}
-  const formControl = ["input", "select", "change"].includes(a.type);
-  t.steps[index] = {
+    generated = await requestAiJson(prompt, config, copySchema);
+    if (step.action !== "introduction") {
+      const actions = meaningfulActions(readActions(id));
+      const actionIndex = Number.isInteger(step.actionIndex)
+        ? Number(step.actionIndex)
+        : index - 1;
+      generated = standardizeGeneratedCopy(
+        generated,
+        actions[actionIndex],
+        actionIndex,
+        actions,
+        tutorial.name,
+      );
+    } else validatedCopy(generated, `step ${index + 1}`);
+  } catch {
+    textSource = "local";
+    if (step.action === "introduction") {
+      generated = localTutorialCopy(tutorial, []).introduction;
+    } else {
+      const actions = meaningfulActions(readActions(id));
+      const actionIndex = Number.isInteger(step.actionIndex)
+        ? Number(step.actionIndex)
+        : index - 1;
+      generated = localActionCopy(actions[actionIndex], actionIndex, actions);
+    }
+  }
+  const copy = validatedCopy(generated, `step ${index + 1}`);
+  tutorial.steps[index] = {
     ...step,
-    title: formControl ? titleFor(a) : String(obj.title || titleFor(a)),
-    instruction: formControl
-      ? instructionFor(a)
-      : String(obj.instruction || instructionFor(a)),
-    startMs: Number(step.startMs ?? a.activeMs ?? a.ts),
-    endMs: Number(
-      step.endMs ?? Number(step.startMs ?? a.activeMs ?? a.ts) + 1500,
-    ),
-    action: a.type,
-    selector: a.selector,
-    value: formControl ? undefined : a.sensitive ? "[protected]" : step.value,
+    ...copy,
     audio: undefined,
-    actionIndex: actionIndex,
+    textSource,
+    voiceSource: undefined,
   };
-  t.status = "review";
-  t.stage = "steps";
-  t.video = undefined;
-  save(t);
-  return t.steps[index];
-}
-function titleFor(a: any) {
-  if (a.type === "click") return `Click ${a.text || "the selected control"}`;
-  if (a.type === "input")
-    return `Enter information in ${a.fieldLabel || "the text field"}`;
-  if (a.type === "select")
-    return `Choose an option from ${a.fieldLabel || "the dropdown"}`;
-  if (a.type === "change")
-    return `${a.fieldKind === "radio" ? "Select radio option" : a.fieldKind === "checkbox" ? "Toggle checkbox" : "Change control"}${a.fieldLabel ? ` · ${a.fieldLabel}` : ""}`;
-  return "Continue to the next page";
-}
-function instructionFor(a: any) {
-  if (a.type === "click") return `Click ${a.text || "the selected control"}.`;
-  if (a.type === "input")
-    return `Enter the required information in ${a.fieldLabel || "the selected text field"}.`;
-  if (a.type === "select")
-    return `Choose an option from ${a.fieldLabel || "the dropdown"}.`;
-  if (a.type === "change")
-    return `${a.fieldKind === "radio" ? "Select the radio option" : a.fieldKind === "checkbox" ? "Toggle the checkbox" : "Change the control"}${a.fieldLabel ? ` for ${a.fieldLabel}` : ""}.`;
-  return "Continue to the next page.";
+  tutorial.status = "review";
+  tutorial.stage = "steps";
+  tutorial.message = `Step ${index + 1} regenerated with ${textSource === "ai" ? providerName(config) : "local templates"}.`;
+  tutorial.video = undefined;
+  save(tutorial);
+  return tutorial.steps[index];
 }

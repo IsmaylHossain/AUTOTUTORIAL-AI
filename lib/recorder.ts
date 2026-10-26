@@ -1,9 +1,14 @@
-import { chromium, BrowserContext, Page } from "playwright";
+import { chromium, Browser, BrowserContext, Page } from "playwright";
+import type { Video } from "playwright";
+import { spawn } from "child_process";
 import path from "path";
 import fs from "fs";
-import { waitForMediaDuration } from "./media";
+import { ffmpegPath, waitForMediaDuration } from "./media";
 import { dir, get, remove, save, settings } from "./store";
+type PageTrack = { page: Page; video: Video | null; videoStartedAt: number };
+type WindowSegment = { page: Page; startAt: number; endAt?: number };
 type Session = {
+  browser: Browser;
   context: BrowserContext;
   page: Page;
   started: number;
@@ -20,6 +25,10 @@ type Session = {
     string,
     { path: string; promise: Promise<void>; activeMs: number }
   >;
+  pageTracks: Map<Page, PageTrack>;
+  windowSegments: WindowSegment[];
+  activePage: Page;
+  stopping: boolean;
 };
 const globalKey = "__autotutorialRecorderSessions";
 const sessions: Map<string, Session> =
@@ -54,20 +63,24 @@ async function activateAfterLoad(id: string, session: Session) {
   session.activating = true;
   try {
     await session.page
-      .waitForLoadState("networkidle", { timeout: 8000 })
+      .waitForLoadState("domcontentloaded", { timeout: 8000 })
       .catch(() => {});
     await session.page
       .evaluate(async () => {
+        await new Promise((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(resolve)),
+        );
         if (document.fonts?.ready)
           await Promise.race([
             document.fonts.ready,
-            new Promise((resolve) => setTimeout(resolve, 3000)),
+            new Promise((resolve) => setTimeout(resolve, 600)),
           ]);
       })
       .catch(() => {});
     if (session.page.isClosed()) return;
     session.started = Date.now();
     session.ready = true;
+    markActivePage(session, session.activePage, session.started);
     const tutorial = get(id);
     if (tutorial) {
       tutorial.recordingStartedAt = session.started;
@@ -164,24 +177,172 @@ function activeMs(s: Session) {
       (s.paused ? Date.now() - s.pausedAt : 0),
   );
 }
+
+function activeMsAt(s: Session, timestamp: number) {
+  if (!Number.isFinite(timestamp)) return activeMs(s);
+  return Math.max(
+    0,
+    Math.min(activeMs(s), timestamp - s.started - s.pausedMs),
+  );
+}
+
+function markActivePage(session: Session, page: Page, timestamp = Date.now()) {
+  if (page.isClosed()) return;
+  session.activePage = page;
+  if (!session.ready) return;
+  const startAt = Math.max(session.started, timestamp);
+  const current = session.windowSegments.at(-1);
+  if (current?.page === page && !current.endAt) return;
+  if (current && !current.endAt) current.endAt = Math.max(current.startAt, startAt);
+  session.windowSegments.push({ page, startAt });
+}
+
+function retainPageVideo(session: Session, page: Page, videoStartedAt = Date.now()) {
+  const existing = session.pageTracks.get(page);
+  let video: Video | null = null;
+  try {
+    video = page.video();
+  } catch {}
+  if (existing) {
+    if (video) existing.video = video;
+    return existing;
+  }
+  const track = { page, video, videoStartedAt };
+  session.pageTracks.set(page, track);
+  return track;
+}
+
+function runFfmpeg(args: string[]) {
+  const binary = ffmpegPath();
+  if (!binary) throw new Error("FFmpeg is required to combine window recordings.");
+  return new Promise<void>((resolve, reject) => {
+    const process = spawn(binary, args, { stdio: ["ignore", "ignore", "pipe"] });
+    let stderr = "";
+    process.stderr.on("data", (chunk) => {
+      stderr = (stderr + chunk.toString()).slice(-16000);
+    });
+    process.on("error", reject);
+    process.on("close", (code) =>
+      code === 0
+        ? resolve()
+        : reject(new Error(stderr || `FFmpeg exited with ${code}`)),
+    );
+  });
+}
+
+async function combineWindowVideos(id: string, session: Session, stoppedAt: number) {
+  const finalSegment = session.windowSegments.at(-1);
+  if (finalSegment && !finalSegment.endAt)
+    finalSegment.endAt = Math.max(finalSegment.startAt, stoppedAt);
+  const videoByPage = new Map<Page, string>();
+  for (const track of session.pageTracks.values()) {
+    try {
+      const video = track.video;
+      if (!video) continue;
+      const file = await video.path();
+      if (file && fs.existsSync(file)) {
+        await waitForMediaDuration(file, 15000, 1024);
+        videoByPage.set(track.page, file);
+      }
+    } catch {}
+  }
+  const usedFiles = new Set(videoByPage.values());
+  const unclaimedFiles = fs
+    .readdirSync(dir(id))
+    .filter((name) => name.endsWith(".webm"))
+    .map((name) => {
+      const file = path.join(dir(id), name);
+      return { file, createdAt: fs.statSync(file).birthtimeMs };
+    })
+    .filter(({ file }) => !usedFiles.has(file));
+  for (const track of session.pageTracks.values()) {
+    if (videoByPage.has(track.page) || !unclaimedFiles.length) continue;
+    unclaimedFiles.sort(
+      (left, right) =>
+        Math.abs(left.createdAt - track.videoStartedAt) -
+        Math.abs(right.createdAt - track.videoStartedAt),
+    );
+    const [{ file }] = unclaimedFiles.splice(0, 1);
+    await waitForMediaDuration(file, 15000, 1024);
+    videoByPage.set(track.page, file);
+  }
+  const segments = session.windowSegments
+    .map((segment) => {
+      const track = session.pageTracks.get(segment.page);
+      const file = videoByPage.get(segment.page);
+      const endAt = segment.endAt || stoppedAt;
+      if (!track || !file || endAt - segment.startAt < 50) return null;
+      return {
+        file,
+        start: Math.max(0, (segment.startAt - track.videoStartedAt) / 1000),
+        end: Math.max(0, (endAt - track.videoStartedAt) / 1000),
+      };
+    })
+    .filter((segment): segment is { file: string; start: number; end: number } =>
+      !!segment && segment.end > segment.start,
+    );
+  if (!segments.length) return latestVideo(id);
+  if (videoByPage.size <= 1) return segments[0].file;
+  const output = path.join(dir(id), "recording-windows.mp4");
+  const args = ["-y"];
+  for (const segment of segments) args.push("-i", segment.file);
+  const graph = segments.map(
+    (segment, index) =>
+      `[${index}:v]trim=start=${segment.start.toFixed(3)}:end=${segment.end.toFixed(3)},setpts=PTS-STARTPTS,scale=1440:820:force_original_aspect_ratio=decrease,pad=1440:820:(ow-iw)/2:(oh-ih)/2:black,setsar=1[v${index}]`,
+  );
+  graph.push(
+    `${segments.map((_, index) => `[v${index}]`).join("")}concat=n=${segments.length}:v=1:a=0[vout]`,
+  );
+  args.push(
+    "-filter_complex",
+    graph.join(";"),
+    "-map",
+    "[vout]",
+    "-an",
+    "-c:v",
+    "libx264",
+    "-preset",
+    "veryfast",
+    "-crf",
+    "18",
+    "-r",
+    "30",
+    "-pix_fmt",
+    "yuv420p",
+    "-movflags",
+    "+faststart",
+    output,
+  );
+  await runFfmpeg(args);
+  return output;
+}
 export async function startRecording(id: string, url: string) {
   const d = dir(id);
-  const context = await chromium.launchPersistentContext(
-    path.join(d, "browser-profile"),
-    {
-      headless: false,
+  // Remove profiles created by older versions. Each recording now uses a new
+  // non-persistent context, so cookies and other site data die with the session.
+  fs.rmSync(path.join(d, "browser-profile"), { recursive: true, force: true });
+  const browser = await chromium.launch({
+    headless: false,
+    args: ["--start-maximized"],
+  });
+  let context: BrowserContext;
+  try {
+    context = await browser.newContext({
       viewport: null,
       recordVideo: { dir: d, size: { width: 1440, height: 820 } },
-      args: ["--start-maximized"],
-    },
-  );
+    });
+  } catch (error) {
+    await browser.close().catch(() => {});
+    throw error;
+  }
   const cursorOverlay = path.resolve(process.cwd(), "lib/cursor-overlay.js");
   if (fs.existsSync(cursorOverlay))
     await context.addInitScript({ path: cursorOverlay });
   const inject = path.resolve(process.cwd(), "lib/recorder-inject.js");
   if (fs.existsSync(inject)) await context.addInitScript({ path: inject });
-  const page = context.pages()[0] || (await context.newPage());
+  const page = await context.newPage();
   const session: Session = {
+    browser,
     context,
     page,
     started: 0,
@@ -195,7 +356,12 @@ export async function startRecording(id: string, url: string) {
     screenshotChain: Promise.resolve(),
     captureSeq: countActions(id),
     pendingCaptures: new Map(),
+    pageTracks: new Map(),
+    windowSegments: [],
+    activePage: page,
+    stopping: false,
   };
+  retainPageVideo(session, page, session.videoStartedAt);
   sessions.set(id, session);
   const t = get(id);
   if (t) {
@@ -205,39 +371,69 @@ export async function startRecording(id: string, url: string) {
     t.message = "Loading website before recording…";
     save(t);
   }
+  const attachedPages = new WeakSet<Page>();
   const attachPage = (targetPage: Page) => {
+    if (attachedPages.has(targetPage)) return;
+    attachedPages.add(targetPage);
     targetPage.on("console", async (msg) => {
       const text = msg.text();
       const isCapture = text.startsWith("AUTOTUTORIAL_CAPTURE:");
       const isAction = text.startsWith("AUTOTUTORIAL_ACTION:");
-      if (!isCapture && !isAction) return;
+      const isWindow = text.startsWith("AUTOTUTORIAL_WINDOW:");
+      if (!isCapture && !isAction && !isWindow) return;
       try {
         const current = sessions.get(id);
-        if (!current || !current.ready || current.paused) return;
+        if (!current) return;
+        if (isWindow) {
+          const event = JSON.parse(text.slice("AUTOTUTORIAL_WINDOW:".length));
+          if (event.state === "focus")
+            markActivePage(current, targetPage, Number(event.ts) || Date.now());
+          return;
+        }
+        if (!current.ready) return;
         if (isCapture) {
           const capture = JSON.parse(
             text.slice("AUTOTUTORIAL_CAPTURE:".length),
           );
+          markActivePage(current, targetPage, Number(capture.ts) || Date.now());
           const token = String(capture.token || "");
           if (!token || current.pendingCaptures.has(token)) return;
+          if (current.paused) {
+            await Promise.allSettled(
+              targetPage.frames().map((frame) =>
+                frame.evaluate((captureToken) => {
+                  (window as any).__autotutorialReleaseCapture?.(captureToken);
+                }, token),
+              ),
+            );
+            return;
+          }
           const capturePath = path.join(d, pendingScreenshotName(token));
-          const capturePromise = current.screenshotChain.then(() =>
-            safeScreenshot(targetPage, capturePath),
-          );
-          current.screenshotChain = capturePromise;
+          const capturePromise = safeScreenshot(targetPage, capturePath);
           current.pendingCaptures.set(token, {
             path: capturePath,
             promise: capturePromise,
             activeMs: activeMs(current),
           });
+          await capturePromise;
+          await Promise.allSettled(
+            targetPage.frames().map((frame) =>
+              frame.evaluate((captureToken) => {
+                (window as any).__autotutorialReleaseCapture?.(captureToken);
+              }, token),
+            ),
+          );
           return;
         }
+        if (current.paused) return;
         const action = JSON.parse(text.slice("AUTOTUTORIAL_ACTION:".length));
+        markActivePage(current, targetPage, Number(action.ts) || Date.now());
         if (["input", "select", "change"].includes(action.type))
           action.value = undefined;
         action.text = redactSecrets(action.text);
         action.fieldLabel = redactSecrets(action.fieldLabel);
-        action.activeMs = activeMs(current);
+        action.activeMs = activeMsAt(current, Number(action.interactionTs));
+        delete action.interactionTs;
         const captureToken = String(action.captureToken || "");
         const pendingCapture = captureToken
           ? current.pendingCaptures.get(captureToken)
@@ -258,6 +454,7 @@ export async function startRecording(id: string, url: string) {
             fs.renameSync(pendingCapture.path, destination);
           else await safeScreenshot(targetPage, destination);
           action.screenshotMs = pendingCapture.activeMs;
+          action.screenshot = screenshotName(n);
           current.pendingCaptures.delete(captureToken);
         } else if (action.type === "click") {
           const n = ++current.captureSeq;
@@ -269,6 +466,7 @@ export async function startRecording(id: string, url: string) {
           );
           await current.screenshotChain;
           action.screenshotMs = activeMs(current);
+          action.screenshot = screenshotName(n);
         } else if (["input", "select", "change"].includes(action.type)) {
           const n = ++current.captureSeq;
           queueScreenshot(
@@ -276,9 +474,11 @@ export async function startRecording(id: string, url: string) {
             targetPage,
             path.join(d, "screenshots", screenshotName(n)),
           );
+          action.screenshot = screenshotName(n);
         }
         const p = actionsPath(id);
         fs.appendFileSync(p, JSON.stringify(action) + "\n");
+        if (action.type === "move") return;
         const tt = get(id);
         if (tt) {
           tt.status = "recording";
@@ -291,6 +491,7 @@ export async function startRecording(id: string, url: string) {
     targetPage.on("load", () => {
       const current = sessions.get(id);
       if (!current) return;
+      retainPageVideo(current, targetPage);
       if (
         !current.ready &&
         current.mainNavigationResponded &&
@@ -299,24 +500,56 @@ export async function startRecording(id: string, url: string) {
         void activateAfterLoad(id, current);
         return;
       }
-      if (current.ready && !current.paused)
+      if (current.ready)
         targetPage
-          .evaluate(() => {
+          .evaluate((paused) => {
             (window as any).__autotutorialStart?.();
-          })
+            (window as any).__autotutorialSetPaused?.(paused);
+          }, current.paused)
           .catch(() => {});
+    });
+    targetPage.on("close", () => {
+      const current = sessions.get(id);
+      if (!current) return;
+      retainPageVideo(current, targetPage);
+      if (current.stopping || current.activePage !== targetPage) return;
+      const fallback = current.context
+        .pages()
+        .filter((candidate) => !candidate.isClosed() && candidate !== targetPage)
+        .at(-1);
+      if (fallback) markActivePage(current, fallback);
+    });
+    targetPage.on("popup", (popup) => {
+      const current = session;
+      retainPageVideo(current, popup);
+      markActivePage(current, popup);
+      attachPage(popup);
+      popup
+        .evaluate((paused) => {
+          (window as any).__autotutorialStart?.();
+          (window as any).__autotutorialSetPaused?.(paused);
+        }, current.paused)
+        .catch(() => {});
     });
   };
   attachPage(page);
   context.on("page", (p) => {
+    const current = session;
+    retainPageVideo(current, p);
+    markActivePage(current, p);
     attachPage(p);
-    p.evaluate(() => {
+    p.evaluate((paused) => {
       (window as any).__autotutorialStart?.();
-    }).catch(() => {});
+      (window as any).__autotutorialSetPaused?.(paused);
+    }, !!current?.paused).catch(() => {});
   });
   context.on("close", () => {
     const current = sessions.get(id);
     if (current) {
+      if (current.stopping) {
+        sessions.delete(id);
+        return;
+      }
       if (current.paused) {
         const tt = get(id);
         if (tt) {
@@ -347,14 +580,14 @@ export async function startRecording(id: string, url: string) {
         session.mainNavigationResponded = true;
         if (page.isClosed()) return;
         void page
-          .waitForLoadState("load", { timeout: 60000 })
+          .waitForLoadState("domcontentloaded", { timeout: 30000 })
           .then(() => activateAfterLoad(id, session))
           .catch(() => {});
       }
     } catch {}
   });
   void page
-    .goto(url, { waitUntil: "load", timeout: 60000 })
+    .goto(url, { waitUntil: "domcontentloaded", timeout: 30000 })
     .then(() => activateAfterLoad(id, session))
     .catch((e: any) => {
       const tutorial = get(id);
@@ -369,7 +602,7 @@ export async function startRecording(id: string, url: string) {
 export function status(id: string) {
   const s = sessions.get(id),
     t = get(id),
-    connected = !!s && !s.page.isClosed();
+    connected = !!s && s.context.pages().some((page) => !page.isClosed());
   if (t && t.status === "recording" && !s) {
     t.status = "interrupted";
     t.stage = "interrupted";
@@ -436,6 +669,11 @@ export async function stopRecording(id: string) {
       save(t);
     }
   }
+  s.stopping = true;
+  const stoppedAt = Date.now();
+  const lastSegment = s.windowSegments.at(-1);
+  if (lastSegment && !lastSegment.endAt)
+    lastSegment.endAt = Math.max(lastSegment.startAt, stoppedAt);
   try {
     await s.screenshotChain;
   } catch {}
@@ -445,20 +683,29 @@ export async function stopRecording(id: string) {
     } catch {}
   }
   s.pendingCaptures.clear();
-  await safeScreenshot(
-    s.page,
-    path.join(dir(id), "screenshots", screenshotName(++s.captureSeq)),
-  );
+  const finalPage = !s.activePage.isClosed()
+    ? s.activePage
+    : s.context.pages().filter((page) => !page.isClosed()).at(-1);
+  if (finalPage)
+    await safeScreenshot(
+      finalPage,
+      path.join(dir(id), "screenshots", screenshotName(++s.captureSeq)),
+    );
   try {
     await s.context.close();
   } catch {}
+  try {
+    await s.browser.close();
+  } catch {}
   sessions.delete(id);
-  const video = latestVideo(id);
+  const video = await combineWindowVideos(id, s, stoppedAt);
   if (!video)
     throw new Error("Browser stopped but no recording video was produced.");
   const finalDuration = await waitForMediaDuration(video, 15000, 1024);
   const t = get(id);
   if (t) {
+    if (path.basename(video) === "recording-windows.mp4")
+      t.videoStartOffsetMs = 0;
     t.status = "processing";
     t.stage = "recorded";
     t.progress = 5;
@@ -487,6 +734,9 @@ export async function cancelRecording(id: string) {
     try {
       await s.context.close();
     } catch {}
+    try {
+      await s.browser.close();
+    } catch {}
   }
   return remove(id);
 }
@@ -496,6 +746,15 @@ export async function pauseRecording(id: string) {
   if (s.paused) return { paused: true };
   s.paused = true;
   s.pausedAt = Date.now();
+  await Promise.allSettled(
+    s.context.pages().flatMap((page) =>
+      page.frames().map((frame) =>
+        frame.evaluate(() => {
+          (window as any).__autotutorialSetPaused?.(true);
+        }),
+      ),
+    ),
+  );
   const t = get(id);
   if (t) {
     const arr = t.pauseIntervals || [];
@@ -503,7 +762,7 @@ export async function pauseRecording(id: string) {
     t.pauseIntervals = arr;
     t.status = "recording";
     t.stage = "recording";
-    t.message = "Recording paused. Browser interactions are ignored.";
+    t.message = "Recording paused. Browser remains fully interactive.";
     save(t);
   }
   return { paused: true };
@@ -515,6 +774,15 @@ export async function resumeRecording(id: string) {
   s.pausedMs += Date.now() - s.pausedAt;
   s.paused = false;
   s.pausedAt = 0;
+  await Promise.allSettled(
+    s.context.pages().flatMap((page) =>
+      page.frames().map((frame) =>
+        frame.evaluate(() => {
+          (window as any).__autotutorialSetPaused?.(false);
+        }),
+      ),
+    ),
+  );
   const t = get(id);
   if (t) {
     const arr = t.pauseIntervals || [];
