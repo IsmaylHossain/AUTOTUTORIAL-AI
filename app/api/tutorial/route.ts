@@ -8,6 +8,12 @@ export async function GET(req: Request) {
   return NextResponse.json({
     ...t,
     videoUrl: t.video ? `/api/video?id=${encodeURIComponent(id)}` : null,
+    templateImageUrl: t.templateImage
+      ? `/api/tutorial/template?id=${encodeURIComponent(id)}`
+      : null,
+    musicUrl: t.music
+      ? `/api/tutorial/music?id=${encodeURIComponent(id)}`
+      : null,
   });
 }
 export async function PATCH(req: Request) {

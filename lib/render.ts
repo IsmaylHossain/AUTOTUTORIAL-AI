@@ -30,15 +30,57 @@ export function cancelRender(id: string) {
 async function duration(file: string) {
   return readMediaDuration(file);
 }
-function escapeFilterPath(value: string) {
+function escapeXml(value: string) {
   return value
-    .replace(/\\/g, "\\\\")
-    .replace(/:/g, "\\:")
-    .replace(/'/g, "\\'")
-    .replace(/,/g, "\\,")
-    .replace(/;/g, "\\;")
-    .replace(/\[/g, "\\[")
-    .replace(/\]/g, "\\]");
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+async function createVideoCard(
+  output: string,
+  width: number,
+  height: number,
+  projectName: string,
+  kind: "opening" | "intro" | "outro",
+  templateImage?: string,
+) {
+  const name = escapeXml(projectName);
+  const titleSize = Math.max(
+    Math.round(width * 0.018),
+    Math.min(
+      Math.round(width * 0.043),
+      Math.round((width * 0.68) / Math.max(18, (projectName.length + 12) * 0.58)),
+    ),
+  );
+  const mainSize = Math.max(26, Math.round(width * 0.043));
+  const overlay = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
+    <defs>
+      <linearGradient id="shade" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#08111f" stop-opacity="0.24"/><stop offset="0.5" stop-color="#08111f" stop-opacity="0.46"/><stop offset="1" stop-color="#08111f" stop-opacity="0.88"/></linearGradient>
+      <linearGradient id="default" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#111b32"/><stop offset="0.52" stop-color="#18234a"/><stop offset="1" stop-color="#0b1220"/></linearGradient>
+    </defs>
+    ${templateImage ? "" : '<rect width="100%" height="100%" fill="url(#default)"/><circle cx="88%" cy="14%" r="26%" fill="#6366f1" opacity="0.13"/><circle cx="12%" cy="88%" r="31%" fill="#38bdf8" opacity="0.08"/><rect width="100%" height="100%" fill="url(#shade)"/>'}
+    ${kind === "opening" ? "" : kind === "outro" ? `<rect x="${Math.round(width * 0.31)}" y="${Math.round(height * 0.69)}" width="${Math.round(width * 0.38)}" height="${Math.round(height * 0.19)}" rx="${Math.max(10, Math.round(width * 0.01))}" fill="#08111f" fill-opacity="0.9" stroke="#ffffff" stroke-opacity="0.28"/><line x1="${Math.round(width * 0.425)}" y1="${Math.round(height * 0.735)}" x2="${Math.round(width * 0.575)}" y2="${Math.round(height * 0.735)}" stroke="#38bdf8" stroke-width="${Math.max(3, Math.round(width * 0.003))}" stroke-linecap="round"/><text x="${Math.round(width / 2)}" y="${Math.round(height * 0.83)}" text-anchor="middle" fill="#ffffff" font-family="Arial, sans-serif" font-size="${mainSize}" font-weight="700">Thank you</text>` : `<rect x="${Math.round(width * 0.12)}" y="${Math.round(height * 0.68)}" width="${Math.round(width * 0.76)}" height="${Math.round(height * 0.2)}" rx="${Math.max(10, Math.round(width * 0.01))}" fill="#08111f" fill-opacity="0.9" stroke="#ffffff" stroke-opacity="0.28"/><line x1="${Math.round(width * 0.425)}" y1="${Math.round(height * 0.725)}" x2="${Math.round(width * 0.575)}" y2="${Math.round(height * 0.725)}" stroke="#38bdf8" stroke-width="${Math.max(3, Math.round(width * 0.003))}" stroke-linecap="round"/><text x="${Math.round(width / 2)}" y="${Math.round(height * 0.83)}" text-anchor="middle" fill="#ffffff" font-family="Arial, sans-serif" font-size="${titleSize}" font-weight="700">Welcome to &apos;${name}&apos; Tutorial.</text>`}
+  </svg>`;
+  const composition = templateImage
+    ? sharp(templateImage).resize(width, height, {
+        fit: "contain",
+        position: "centre",
+        background: { r: 11, g: 18, b: 32, alpha: 1 },
+      })
+    : sharp({
+        create: {
+          width,
+          height,
+          channels: 4,
+          background: { r: 11, g: 18, b: 32, alpha: 1 },
+        },
+      });
+  await composition
+    .composite([{ input: Buffer.from(overlay), top: 0, left: 0 }])
+    .png()
+    .toFile(output);
 }
 function ensureVideo(file: string) {
   if (!file || !fs.existsSync(file))
@@ -198,6 +240,7 @@ export async function render(id: string) {
   t.message = "Starting final video render…";
   t.progress = 1;
   t.video = undefined;
+  t.videoOpeningMs = undefined;
   save(t);
   const timeline = buildTimeline(id);
   const source = await prepareSource(id, t.recording, rawDur);
@@ -210,19 +253,24 @@ export async function render(id: string) {
   const preset = quality === "low" ? "faster" : quality === "medium" ? "fast" : "veryfast";
   const hasIntro = timeline.steps[0]?.action === "introduction";
   const introSec = hasIntro ? INTRO_DURATION_MS / 1000 : 0;
-  const outputDur = sourceDur + introSec;
+  const hasTemplate = !!(
+    t.templateImage && fs.existsSync(t.templateImage)
+  );
+  const openingSec = hasIntro && hasTemplate ? 3 : 0;
+  const outroSec = hasIntro && hasTemplate ? INTRO_DURATION_MS / 1000 : 0;
+  const leadInSec = openingSec + introSec;
+  const outputDur = sourceDur + leadInSec + outroSec;
   const sourceSize = readMediaDimensions(source) || {
     width: timeline.width,
     height: timeline.height,
   };
   const filters: string[] = [];
   if (hasIntro) {
-    const titleFile = path.join(d, "intro-title.txt");
-    fs.writeFileSync(titleFile, `Welcome to\n${t.name}`);
     filters.push(
-      `tpad=start_duration=${introSec}:start_mode=clone`,
-      `drawtext=textfile='${escapeFilterPath(titleFile)}':expansion=none:fontcolor=white:fontsize=40:line_spacing=14:x=(w-text_w)/2:y=(h-text_h)/2:box=1:boxcolor=black@0.72:boxborderw=32:enable='between(t,0,${introSec})'`,
+      `tpad=start_duration=${leadInSec}:start_mode=clone`,
     );
+    if (outroSec)
+      filters.push(`tpad=stop_duration=${outroSec}:stop_mode=clone`);
   } else
     filters.push(
       `drawbox=x=0:y=0:w=iw:h=70:color=black@0.58:t=fill:enable='between(t,0,2.5)'`,
@@ -310,7 +358,7 @@ export async function render(id: string) {
       action.type === "input"
         ? Number(action.activeMs || 0)
         : Number(action.screenshotMs ?? action.activeMs ?? 0);
-    const clickAt = introSec + Math.max(0, highlightMs / 1000);
+    const clickAt = leadInSec + Math.max(0, highlightMs / 1000);
     const file = path.join(d, `.focus-${index}.png`);
     const halfStroke = borderWidth / 2;
     const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}"><rect x="${halfStroke}" y="${halfStroke}" width="${width - borderWidth}" height="${height - borderWidth}" rx="${radius}" ry="${radius}" fill="none" stroke="#38BDF8" stroke-width="${borderWidth}"/></svg>`;
@@ -325,7 +373,7 @@ export async function render(id: string) {
   }
   for (const a of timeline.actions.filter((a) => a.sensitive && a.targetRect)) {
     const r = a.targetRect!,
-      sec = introSec + Math.max(0, Number(a.activeMs || 0) / 1000),
+      sec = leadInSec + Math.max(0, Number(a.activeMs || 0) / 1000),
       en = sec + 3,
       x = Math.max(0, r.x - 4),
       y = Math.max(0, r.y - 4),
@@ -335,7 +383,57 @@ export async function render(id: string) {
       `drawbox=x=${x.toFixed(1)}:y=${y.toFixed(1)}:w=${w.toFixed(1)}:h=${h.toFixed(1)}:color=black@0.96:t=fill:enable='between(t,${sec.toFixed(3)},${en.toFixed(3)})'`,
     );
   }
+  const openingCard = openingSec
+    ? path.join(d, ".video-opening.png")
+    : undefined;
+  const introCard = hasIntro ? path.join(d, ".video-intro.png") : undefined;
+  const outroCard = outroSec ? path.join(d, ".video-outro.png") : undefined;
+  if (openingCard)
+    await createVideoCard(
+      openingCard,
+      sourceSize.width,
+      sourceSize.height,
+      t.name,
+      "opening",
+      t.templateImage,
+    );
+  if (introCard)
+    await createVideoCard(
+      introCard,
+      sourceSize.width,
+      sourceSize.height,
+      t.name,
+      "intro",
+      hasTemplate ? t.templateImage : undefined,
+    );
+  if (outroCard)
+    await createVideoCard(
+      outroCard,
+      sourceSize.width,
+      sourceSize.height,
+      t.name,
+      "outro",
+      t.templateImage,
+    );
+
   const visualInputs = ["-y", "-i", source];
+  let nextInputIndex = 1;
+  let openingInputIndex: number | undefined;
+  let introInputIndex: number | undefined;
+  let outroInputIndex: number | undefined;
+  if (openingCard) {
+    openingInputIndex = nextInputIndex++;
+    visualInputs.push("-loop", "1", "-framerate", String(timeline.fps), "-i", openingCard);
+  }
+  if (introCard) {
+    introInputIndex = nextInputIndex++;
+    visualInputs.push("-loop", "1", "-framerate", String(timeline.fps), "-i", introCard);
+  }
+  if (outroCard) {
+    outroInputIndex = nextInputIndex++;
+    visualInputs.push("-loop", "1", "-framerate", String(timeline.fps), "-i", outroCard);
+  }
+  const focusInputStart = nextInputIndex;
   for (const overlay of focusOverlays)
     visualInputs.push(
       "-loop",
@@ -347,10 +445,28 @@ export async function render(id: string) {
     );
   const visualGraph = [`[0:v]${filters.join(",")}[base]`];
   let visualOutput = "[base]";
+  if (openingInputIndex !== undefined) {
+    visualGraph.push(
+      `${visualOutput}[${openingInputIndex}:v]overlay=x=0:y=0:enable='between(t,0,${openingSec.toFixed(3)})'[coveredOpening]`,
+    );
+    visualOutput = "[coveredOpening]";
+  }
+  if (introInputIndex !== undefined) {
+    visualGraph.push(
+      `${visualOutput}[${introInputIndex}:v]overlay=x=0:y=0:enable='between(t,${openingSec.toFixed(3)},${leadInSec.toFixed(3)})'[coveredIntro]`,
+    );
+    visualOutput = "[coveredIntro]";
+  }
+  if (outroInputIndex !== undefined) {
+    visualGraph.push(
+      `${visualOutput}[${outroInputIndex}:v]overlay=x=0:y=0:enable='between(t,${(leadInSec + sourceDur).toFixed(3)},${outputDur.toFixed(3)})'[coveredOutro]`,
+    );
+    visualOutput = "[coveredOutro]";
+  }
   focusOverlays.forEach((overlay, index) => {
     const next = `[focus${index}]`;
     visualGraph.push(
-      `${visualOutput}[${index + 1}:v]overlay=x=${overlay.x.toFixed(1)}:y=${overlay.y.toFixed(1)}:enable='between(t,${overlay.start.toFixed(3)},${overlay.end.toFixed(3)})'${next}`,
+      `${visualOutput}[${focusInputStart + index}:v]overlay=x=${overlay.x.toFixed(1)}:y=${overlay.y.toFixed(1)}:enable='between(t,${overlay.start.toFixed(3)},${overlay.end.toFixed(3)})'${next}`,
     );
     visualOutput = next;
   });
@@ -395,11 +511,51 @@ export async function render(id: string) {
     save(t);
     try {
       const clean = ["-y", "-i", source];
-      if (hasIntro)
-        clean.push("-vf", `tpad=start_duration=${introSec}:start_mode=clone`);
+      const cleanGraph: string[] = [];
+      let cleanOutput = "[cleanBase]";
+      if (hasIntro) {
+        let cleanNextInput = 1;
+        let cleanOpeningInput: number | undefined;
+        let cleanIntroInput: number | undefined;
+        let cleanOutroInput: number | undefined;
+        if (openingCard) {
+          cleanOpeningInput = cleanNextInput++;
+          clean.push("-loop", "1", "-framerate", String(timeline.fps), "-i", openingCard);
+        }
+        if (introCard) {
+          cleanIntroInput = cleanNextInput++;
+          clean.push("-loop", "1", "-framerate", String(timeline.fps), "-i", introCard);
+        }
+        if (outroCard) {
+          cleanOutroInput = cleanNextInput++;
+          clean.push("-loop", "1", "-framerate", String(timeline.fps), "-i", outroCard);
+        }
+        cleanGraph.push(
+          `[0:v]tpad=start_duration=${leadInSec}:start_mode=clone${outroSec ? `,tpad=stop_duration=${outroSec}:stop_mode=clone` : ""}[cleanBase]`,
+        );
+        if (cleanOpeningInput !== undefined) {
+          cleanGraph.push(
+            `${cleanOutput}[${cleanOpeningInput}:v]overlay=0:0:enable='between(t,0,${openingSec.toFixed(3)})'[cleanOpening]`,
+          );
+          cleanOutput = "[cleanOpening]";
+        }
+        if (cleanIntroInput !== undefined) {
+          cleanGraph.push(
+            `${cleanOutput}[${cleanIntroInput}:v]overlay=0:0:enable='between(t,${openingSec.toFixed(3)},${leadInSec.toFixed(3)})'[cleanIntro]`,
+          );
+          cleanOutput = "[cleanIntro]";
+        }
+        if (cleanOutroInput !== undefined) {
+          cleanGraph.push(
+            `${cleanOutput}[${cleanOutroInput}:v]overlay=0:0:enable='between(t,${(leadInSec + sourceDur).toFixed(3)},${outputDur.toFixed(3)})'[cleanOutro]`,
+          );
+          cleanOutput = "[cleanOutro]";
+        }
+        clean.push("-filter_complex", cleanGraph.join(";"), "-map", cleanOutput);
+      } else {
+        clean.push("-map", "0:v:0");
+      }
       clean.push(
-        "-map",
-        "0:v:0",
         "-c:v",
         "libx264",
         "-preset",
@@ -411,6 +567,8 @@ export async function render(id: string) {
         "-pix_fmt",
         "yuv420p",
         "-an",
+        "-t",
+        outputDur.toFixed(3),
         "-movflags",
         "+faststart",
         "-progress",
@@ -439,16 +597,73 @@ export async function render(id: string) {
   } finally {
     for (const overlay of focusOverlays)
       fs.rmSync(overlay.file, { force: true });
+    if (openingCard) fs.rmSync(openingCard, { force: true });
+    if (introCard) fs.rmSync(introCard, { force: true });
+    if (outroCard) fs.rmSync(outroCard, { force: true });
+  }
+  const musicFile = t.music && fs.existsSync(t.music) ? t.music : undefined;
+  let musicApplied = false;
+  if (musicFile) {
+    const withMusic = path.join(d, "tutorial-music.mp4");
+    const fadeDuration = Math.min(1.5, Math.max(0.2, outputDur));
+    const fadeStart = Math.max(0, outputDur - fadeDuration);
+    const musicMix = [
+      "-y",
+      "-i",
+      out,
+      "-stream_loop",
+      "-1",
+      "-i",
+      musicFile,
+      "-filter_complex",
+      `[1:a]atrim=duration=${outputDur.toFixed(3)},asetpts=PTS-STARTPTS,volume=0.72,afade=t=out:st=${fadeStart.toFixed(3)}:d=${fadeDuration.toFixed(3)}[aout]`,
+      "-map",
+      "0:v:0",
+      "-map",
+      "[aout]",
+      "-c:v",
+      "copy",
+      "-c:a",
+      "aac",
+      "-b:a",
+      "192k",
+      "-t",
+      outputDur.toFixed(3),
+      "-movflags",
+      "+faststart",
+      "-progress",
+      "pipe:1",
+      "-nostats",
+      withMusic,
+    ];
+    try {
+      await runFfmpeg(
+        id,
+        musicMix,
+        outputDur,
+        "Adding music",
+        withMusic,
+        78,
+        99,
+      );
+      fs.renameSync(withMusic, out);
+      musicApplied = true;
+    } catch {
+      fs.rmSync(withMusic, { force: true });
+      t.message = "Music mix failed; falling back to step narration.";
+      save(t);
+    }
   }
   const audioFiles = (timeline.steps || [])
-    .map((s, i) =>
-      s.audio && fs.existsSync(s.audio)
+    .map((s, i) => {
+      if (s.action === "introduction" && !s.audio) return "";
+      return s.audio && fs.existsSync(s.audio)
         ? s.audio
-        : path.join(d, "audio", `step-${String(i + 1).padStart(3, "0")}.wav`),
-    )
+        : path.join(d, "audio", `step-${String(i + 1).padStart(3, "0")}.wav`);
+    })
     .filter((p) => fs.existsSync(p));
   for (const file of audioFiles) normalizeWavHeader(file);
-  if (audioFiles.length) {
+  if (!musicApplied && audioFiles.length) {
     const narrated = path.join(d, "tutorial-narrated.mp4");
     const inputs = ["-y", "-i", out];
     const labels: string[] = [];
@@ -457,7 +672,10 @@ export async function render(id: string) {
       inputs.push("-i", file);
       const step = timeline.steps.findIndex((s) => s.audio === file);
       const st = timeline.steps[step >= 0 ? step : j];
-      const delay = Math.max(0, Math.round(Number(st?.startMs) || 0));
+      const delay = Math.max(
+        0,
+        Math.round((Number(st?.startMs) || 0) + openingSec * 1000),
+      );
       const label = `a${j}`;
       graph.push(
         `[${j + 1}:a]adelay=${delay}:all=1,aresample=async=1[${label}]`,
@@ -497,6 +715,7 @@ export async function render(id: string) {
     }
   }
   t.video = out;
+  t.videoOpeningMs = openingSec * 1000;
   t.status = "ready";
   t.stage = "ready";
   t.progress = 100;

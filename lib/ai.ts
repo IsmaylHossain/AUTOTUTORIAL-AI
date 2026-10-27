@@ -186,6 +186,47 @@ function meaningfulActions(actions: any[]) {
   });
 }
 
+function resolveActionPosition(
+  actions: any[],
+  recordedActionIndex: number | undefined,
+  fallbackPosition: number,
+  expectedActiveMs?: number,
+) {
+  if (Number.isInteger(recordedActionIndex)) {
+    const stablePosition = actions.findIndex(
+      (action) =>
+        Number(action.recordedActionIndex) === Number(recordedActionIndex),
+    );
+    const legacyPosition =
+      Number(recordedActionIndex) >= 0 &&
+      Number(recordedActionIndex) < actions.length
+        ? Number(recordedActionIndex)
+        : -1;
+    if (
+      stablePosition >= 0 &&
+      legacyPosition >= 0 &&
+      stablePosition !== legacyPosition &&
+      Number.isFinite(Number(expectedActiveMs))
+    ) {
+      const stableDistance = Math.abs(
+        Number(actions[stablePosition]?.activeMs || 0) -
+          Number(expectedActiveMs),
+      );
+      const legacyDistance = Math.abs(
+        Number(actions[legacyPosition]?.activeMs || 0) -
+          Number(expectedActiveMs),
+      );
+      return legacyDistance < stableDistance ? legacyPosition : stablePosition;
+    }
+    if (stablePosition >= 0) return stablePosition;
+    if (legacyPosition >= 0) return legacyPosition;
+    return -1;
+  }
+  return fallbackPosition >= 0 && fallbackPosition < actions.length
+    ? fallbackPosition
+    : -1;
+}
+
 const copySchema = {
   type: "object",
   properties: {
@@ -394,8 +435,8 @@ function localActionCopy(action: any, index = 0, actions: any[] = []) {
 function localTutorialCopy(tutorial: Tutorial, actions: any[]) {
   return {
     introduction: {
-      title: `Getting started with ${tutorial.name}`,
-      instruction: `This guide walks through ${tutorial.name} using the recorded workflow, with each action presented in order.`,
+      title: `Welcome to '${tutorial.name}' Tutorial.`,
+      instruction: `Welcome to '${tutorial.name}' Tutorial.`,
     },
     steps: actions.map(localActionCopy),
   };
@@ -527,7 +568,7 @@ export async function analyze(id: string) {
       save(tutorial);
     }
 
-    const introCopy = validatedCopy(generated.introduction, "introduction");
+    const introCopy = localTutorialCopy(tutorial, []).introduction;
     const steps: Step[] = [
       {
         ...introCopy,
@@ -593,9 +634,13 @@ export function validateTutorialSteps(id: string) {
   const issues: string[] = [];
   tutorial.steps = (tutorial.steps || []).map((step: any, index: number) => {
     if (step.action === "introduction") return step;
-    const action = actions[
-      Number.isInteger(step.actionIndex) ? step.actionIndex : index - 1
-    ];
+    const actionPosition = resolveActionPosition(
+      actions,
+      Number.isInteger(step.actionIndex) ? Number(step.actionIndex) : undefined,
+      index - 1,
+      Number(step.startMs) - INTRO_DURATION_MS,
+    );
+    const action = actionPosition >= 0 ? actions[actionPosition] : undefined;
     if (!action) {
       issues.push(`Step ${index + 1} has no matching captured action.`);
       return step;
@@ -630,12 +675,15 @@ export async function regenerateStep(id: string, index: number) {
   const step = tutorial.steps[index];
   let prompt: string;
   if (step.action === "introduction") {
-    prompt = `Write a concise tutorial introduction for project ${JSON.stringify(tutorial.name)} at ${JSON.stringify(tutorial.url)}. Return title and instruction. Do not invent workflow details.`;
+    prompt = `Rewrite a concise, welcoming introduction for the ${JSON.stringify(tutorial.name)} tutorial. Return a short title and one natural instruction sentence. Do not invent workflow details.`;
   } else {
     const actions = meaningfulActions(readActions(id));
-    const actionIndex = Number.isInteger(step.actionIndex)
-      ? Number(step.actionIndex)
-      : index - 1;
+    const actionIndex = resolveActionPosition(
+      actions,
+      Number.isInteger(step.actionIndex) ? Number(step.actionIndex) : undefined,
+      index - 1,
+      Number(step.startMs) - INTRO_DURATION_MS,
+    );
     const action = actions[actionIndex];
     if (!action) throw new Error("No captured action is available for this step.");
     const context = {
@@ -657,9 +705,14 @@ export async function regenerateStep(id: string, index: number) {
     generated = await requestAiJson(prompt, config, copySchema);
     if (step.action !== "introduction") {
       const actions = meaningfulActions(readActions(id));
-      const actionIndex = Number.isInteger(step.actionIndex)
-        ? Number(step.actionIndex)
-        : index - 1;
+      const actionIndex = resolveActionPosition(
+        actions,
+        Number.isInteger(step.actionIndex) ? Number(step.actionIndex) : undefined,
+        index - 1,
+        Number(step.startMs) - INTRO_DURATION_MS,
+      );
+      if (actionIndex < 0)
+        throw new Error("No captured action is available for this step.");
       generated = standardizeGeneratedCopy(
         generated,
         actions[actionIndex],
@@ -671,12 +724,20 @@ export async function regenerateStep(id: string, index: number) {
   } catch {
     textSource = "local";
     if (step.action === "introduction") {
-      generated = localTutorialCopy(tutorial, []).introduction;
+      generated = {
+        title: `Welcome to ${tutorial.name}`,
+        instruction: `Follow this tutorial to complete the recorded workflow step by step.`,
+      };
     } else {
       const actions = meaningfulActions(readActions(id));
-      const actionIndex = Number.isInteger(step.actionIndex)
-        ? Number(step.actionIndex)
-        : index - 1;
+      const actionIndex = resolveActionPosition(
+        actions,
+        Number.isInteger(step.actionIndex) ? Number(step.actionIndex) : undefined,
+        index - 1,
+        Number(step.startMs) - INTRO_DURATION_MS,
+      );
+      if (actionIndex < 0)
+        throw new Error("No captured action is available for this step.");
       generated = localActionCopy(actions[actionIndex], actionIndex, actions);
     }
   }

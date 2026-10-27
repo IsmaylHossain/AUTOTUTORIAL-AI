@@ -54,6 +54,10 @@ export type Tutorial = {
   steps: Step[];
   recording?: string;
   video?: string;
+  videoOpeningMs?: number;
+  templateImage?: string;
+  music?: string;
+  musicName?: string;
   recordingStartedAt?: number;
   videoStartOffsetMs?: number;
   pauseIntervals?: PauseInterval[];
@@ -110,6 +114,8 @@ function repairPaths(t: Tutorial) {
   };
   t.recording = repair(t.recording);
   t.video = repair(t.video);
+  t.templateImage = repair(t.templateImage);
+  t.music = repair(t.music);
   t.steps = (t.steps || []).map((s) => ({ ...s, audio: repair(s.audio) }));
   return t;
 }

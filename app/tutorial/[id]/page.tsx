@@ -14,6 +14,8 @@ import {
   Pencil,
   Check,
   X,
+  ImagePlus,
+  Music2,
 } from "lucide-react";
 
 export default function TutorialPage() {
@@ -27,6 +29,8 @@ export default function TutorialPage() {
   const [assets, setAssets] = useState<any>(null);
   const [busyStep, setBusyStep] = useState(-1);
   const [editingStep, setEditingStep] = useState(-1);
+  const [templateBusy, setTemplateBusy] = useState(false);
+  const [musicBusy, setMusicBusy] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
   async function load() {
     const r = await fetch(`/api/tutorial?id=${id}`, { cache: "no-store" });
@@ -129,6 +133,64 @@ export default function TutorialPage() {
     }
     setT((v: any) => (v ? { ...v, name: next.trim() } : v));
     setMsg("Tutorial renamed.");
+  }
+  async function uploadTemplate(file?: File) {
+    if (!file) return;
+    setTemplateBusy(true);
+    setMsg("Preparing template image…");
+    const form = new FormData();
+    form.set("id", id);
+    form.set("image", file);
+    const r = await fetch("/api/tutorial/template", { method: "POST", body: form });
+    const d = await r.json().catch(() => ({}));
+    setTemplateBusy(false);
+    if (!r.ok) {
+      setMsg(d.error || "Template image upload failed.");
+      return;
+    }
+    setMsg("Template saved. It will be used on the PPTX cover and ending, and the video opening and ending.");
+    await load();
+  }
+  async function removeTemplate() {
+    setTemplateBusy(true);
+    const r = await fetch(`/api/tutorial/template?id=${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    });
+    const d = await r.json().catch(() => ({}));
+    setTemplateBusy(false);
+    setMsg(r.ok ? "Template removed. Default design restored." : d.error || "Could not remove template.");
+    if (r.ok) await load();
+  }
+  async function uploadMusic(file?: File) {
+    if (!file) return;
+    setMusicBusy(true);
+    setMsg("Checking music file…");
+    const form = new FormData();
+    form.set("id", id);
+    form.set("music", file);
+    const r = await fetch("/api/tutorial/music", { method: "POST", body: form });
+    const d = await r.json().catch(() => ({}));
+    setMusicBusy(false);
+    if (!r.ok) {
+      setMsg(d.error || "Music upload failed.");
+      return;
+    }
+    setMsg("Music saved. The next render will use music without step narration.");
+    await load();
+  }
+  async function removeMusic() {
+    setMusicBusy(true);
+    const r = await fetch(`/api/tutorial/music?id=${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    });
+    const d = await r.json().catch(() => ({}));
+    setMusicBusy(false);
+    setMsg(
+      r.ok
+        ? "Music removed. Step narration will be used again."
+        : d.error || "Could not remove music.",
+    );
+    if (r.ok) await load();
   }
   async function downloadScreenshots() {
     if (!assets?.screenshots?.length) return;
@@ -242,7 +304,11 @@ export default function TutorialPage() {
     const s = t.steps[i];
     if (videoRef.current && s) {
       const base = t.steps[0]?.startMs || s.startMs;
-      videoRef.current.currentTime = Math.max(0, (s.startMs - base) / 1000);
+      const openingMs = Number(t.videoOpeningMs) || 0;
+      videoRef.current.currentTime = Math.max(
+        0,
+        (s.startMs - base + openingMs) / 1000,
+      );
       videoRef.current.play().catch(() => {});
     }
   }
@@ -252,6 +318,8 @@ export default function TutorialPage() {
     1,
     (t.steps[t.steps.length - 1]?.endMs || base) - base,
   );
+  const openingMs = Number(t.videoOpeningMs) || 0;
+  const videoTimelineTotal = total + openingMs;
   return (
     <div className="p-8 max-w-7xl mx-auto">
       <header className="flex justify-between items-start gap-5">
@@ -306,6 +374,79 @@ export default function TutorialPage() {
           ) : null}
         </div>
       </header>
+      <div className="card p-5 mt-6">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+          <div className="flex items-start gap-3">
+            <ImagePlus size={21} className="mt-0.5 shrink-0 text-indigo-400" />
+            <div>
+              <h2 className="font-semibold">Tutorial template image</h2>
+              <p className="muted text-sm mt-1">
+                Used for the PPTX first and last pages and the video opening and ending. A polished default is used when no image is added.
+              </p>
+            </div>
+          </div>
+          <div className="flex gap-2 shrink-0">
+            <label className={`btn ${templateBusy ? "opacity-60 pointer-events-none" : ""}`}>
+              {templateBusy ? "Processing…" : t.templateImageUrl ? "Replace image" : "Add image"}
+              <input
+                className="hidden"
+                type="file"
+                accept="image/png,image/jpeg,image/webp"
+                disabled={templateBusy}
+                onChange={(e) => uploadTemplate(e.currentTarget.files?.[0])}
+              />
+            </label>
+            {t.templateImageUrl && (
+              <button className="btn btn-danger" disabled={templateBusy} onClick={removeTemplate}>
+                Remove
+              </button>
+            )}
+          </div>
+        </div>
+        {t.templateImageUrl && (
+          <img
+            src={t.templateImageUrl}
+            alt="Tutorial template preview"
+            className="mt-4 w-full max-h-64 aspect-video object-cover rounded border border-[#272e37]"
+          />
+        )}
+      </div>
+      <div className="card p-5 mt-4">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+          <div className="flex items-start gap-3">
+            <Music2 size={21} className="mt-0.5 shrink-0 text-sky-400" />
+            <div>
+              <h2 className="font-semibold">Video music</h2>
+              <p className="muted text-sm mt-1">
+                Optional. When music is selected, the rendered video uses it instead of all step narration.
+              </p>
+              {t.musicName && (
+                <p className="text-sm mt-2">Selected: {t.musicName}</p>
+              )}
+            </div>
+          </div>
+          <div className="flex gap-2 shrink-0">
+            <label className={`btn ${musicBusy ? "opacity-60 pointer-events-none" : ""}`}>
+              {musicBusy ? "Checking…" : t.musicUrl ? "Replace music" : "Add music"}
+              <input
+                className="hidden"
+                type="file"
+                accept="audio/*,.mp3,.wav,.m4a,.aac,.ogg,.aiff,.aif"
+                disabled={musicBusy}
+                onChange={(e) => uploadMusic(e.currentTarget.files?.[0])}
+              />
+            </label>
+            {t.musicUrl && (
+              <button className="btn btn-danger" disabled={musicBusy} onClick={removeMusic}>
+                Remove
+              </button>
+            )}
+          </div>
+        </div>
+        {t.musicUrl && (
+          <audio className="mt-4 w-full" controls preload="metadata" src={t.musicUrl} />
+        )}
+      </div>
       <div className="card p-5 mt-6">
         <div className="flex items-center justify-between">
           <div>
@@ -368,7 +509,11 @@ export default function TutorialPage() {
                   onTimeUpdate={(e) => {
                     const sec = e.currentTarget.currentTime || 0;
                     setScrub(sec * 1000);
-                    const tm = sec * 1000 + base;
+                    if (sec * 1000 < openingMs) {
+                      setCurrent(-1);
+                      return;
+                    }
+                    const tm = Math.max(0, sec * 1000 - openingMs) + base;
                     const idx = t.steps.findIndex(
                       (x: any) => tm >= x.startMs && tm <= x.endMs,
                     );
@@ -391,7 +536,7 @@ export default function TutorialPage() {
               <input
                 type="range"
                 min="0"
-                max={total}
+                max={videoTimelineTotal}
                 value={scrub}
                 onChange={(e) => {
                   const v = Number(e.target.value);
@@ -405,14 +550,14 @@ export default function TutorialPage() {
                   <button
                     key={i}
                     onClick={() => {
-                      const v = Math.max(0, s.startMs - base);
+                      const v = Math.max(0, s.startMs - base + openingMs);
                       setScrub(v);
                       if (videoRef.current)
                         videoRef.current.currentTime = v / 1000;
                     }}
                     className="absolute top-0 text-[10px] muted"
                     style={{
-                      left: `${Math.min(96, Math.max(0, ((s.startMs - base) / total) * 100))}%`,
+                      left: `${Math.min(96, Math.max(0, ((s.startMs - base + openingMs) / videoTimelineTotal) * 100))}%`,
                     }}
                   >
                     ● {i + 1}

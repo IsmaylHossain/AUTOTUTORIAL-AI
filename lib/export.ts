@@ -28,6 +28,15 @@ function projectFiles(id: string) {
   if (t?.recording && fs.existsSync(t.recording)) {
     files.push({ name: "recording.webm", data: fs.readFileSync(t.recording) });
   }
+  if (t?.templateImage && fs.existsSync(t.templateImage)) {
+    files.push({ name: "template-cover.png", data: fs.readFileSync(t.templateImage) });
+  }
+  if (t?.music && fs.existsSync(t.music)) {
+    files.push({
+      name: `background-music${path.extname(t.music).toLowerCase()}`,
+      data: fs.readFileSync(t.music),
+    });
+  }
   if (t?.steps?.length) {
     const steps = t.steps.map((s: Step, i: number) => `${i + 1}. ${s.title}\n${s.instruction}`);
     files.push({ name: "steps.txt", data: Buffer.from(steps.join("\n\n")) });
@@ -121,7 +130,68 @@ export async function createPptx(id: string): Promise<ArrayBuffer> {
     stepSlides.push({ step, action, name });
   }
   const slideCount = stepSlides.length;
+  const templateImage =
+    t.templateImage && fs.existsSync(t.templateImage)
+      ? fs.readFileSync(t.templateImage)
+      : null;
+  let templatePlacement = { x: 0, y: 0, w: slideWidth, h: slideHeight };
+  if (templateImage) {
+    const metadata = await sharp(templateImage).metadata();
+    const width = metadata.width || 1600;
+    const height = metadata.height || 900;
+    const scale = Math.min(slideWidth / width, slideHeight / height);
+    templatePlacement = {
+      x: (slideWidth - width * scale) / 2,
+      y: (slideHeight - height * scale) / 2,
+      w: width * scale,
+      h: height * scale,
+    };
+  }
 
+  if (templateImage) {
+    const opening = pptx.addSlide();
+    opening.background = { color: colors.navy };
+    opening.addImage({
+      data: `image/png;base64,${templateImage.toString("base64")}`,
+      ...templatePlacement,
+    });
+
+    const intro = pptx.addSlide();
+    intro.background = { color: colors.navy };
+    intro.addImage({
+      data: `image/png;base64,${templateImage.toString("base64")}`,
+      ...templatePlacement,
+    });
+    intro.addShape(pptx.ShapeType.roundRect, {
+      x: 1.52,
+      y: 5.38,
+      w: 10.29,
+      h: 1.3,
+      rectRadius: 0.06,
+      line: { color: "FFFFFF", transparency: 68, width: 0.9 },
+      fill: { color: colors.navy, transparency: 12 },
+    });
+    intro.addShape(pptx.ShapeType.line, {
+      x: 5.67,
+      y: 5.67,
+      w: 2,
+      h: 0,
+      line: { color: colors.focus, width: 2.5 },
+    });
+    intro.addText(`Welcome to '${t.name}' Tutorial.`, {
+      x: 1.85,
+      y: 5.91,
+      w: 9.63,
+      h: 0.52,
+      fontFace: "Aptos Display",
+      fontSize: 25,
+      bold: true,
+      align: "center",
+      color: colors.white,
+      fit: "shrink",
+      margin: 0,
+    });
+  } else {
   const intro = pptx.addSlide();
   intro.background = { color: colors.navy };
   intro.addShape(pptx.ShapeType.rect, {
@@ -274,6 +344,7 @@ export async function createPptx(id: string): Promise<ArrayBuffer> {
     color: "A5B4FC",
     margin: 0,
   });
+  }
 
   if (stepSlides.length) {
     for (const [index, item] of stepSlides.entries()) {
@@ -332,7 +403,15 @@ export async function createPptx(id: string): Promise<ArrayBuffer> {
       const imageX = contentLeft + (contentWidth - imageWidth) / 2;
       const imageY = contentTop + (contentHeight - imageHeight) / 2;
       const slide = pptx.addSlide();
-      slide.background = { color: colors.canvas };
+      slide.background = {
+        color: templateImage ? colors.navy : colors.canvas,
+      };
+      if (templateImage) {
+        slide.addImage({
+          data: `image/png;base64,${templateImage.toString("base64")}`,
+          ...templatePlacement,
+        });
+      }
       const image = fs.readFileSync(file).toString("base64");
       slide.addShape(pptx.ShapeType.rect, {
         x: 0,
@@ -504,6 +583,150 @@ export async function createPptx(id: string): Promise<ArrayBuffer> {
         margin: 0,
       });
     }
+  }
+  if (templateImage) {
+    const outro = pptx.addSlide();
+    outro.background = { color: colors.navy };
+    outro.addImage({
+      data: `image/png;base64,${templateImage.toString("base64")}`,
+      ...templatePlacement,
+    });
+    outro.addShape(pptx.ShapeType.roundRect, {
+      x: 4.12,
+      y: 5.5,
+      w: 5.09,
+      h: 1.18,
+      rectRadius: 0.08,
+      line: { color: "FFFFFF", transparency: 68, width: 0.9 },
+      fill: { color: colors.navy, transparency: 12 },
+    });
+    outro.addShape(pptx.ShapeType.line, {
+      x: 5.67,
+      y: 5.74,
+      w: 2,
+      h: 0,
+      line: { color: colors.focus, width: 2.5 },
+    });
+    outro.addText("Thank you", {
+      x: 3.15,
+      y: 5.93,
+      w: 7.03,
+      h: 0.55,
+      fontFace: "Aptos Display",
+      fontSize: 26,
+      bold: true,
+      align: "center",
+      color: colors.white,
+      margin: 0,
+    });
+  } else {
+    const outro = pptx.addSlide();
+    outro.background = { color: colors.navy };
+    outro.addShape(pptx.ShapeType.rect, {
+      x: 0,
+      y: 0,
+      w: 0.12,
+      h: slideHeight,
+      line: { color: colors.accent, transparency: 100 },
+      fill: { color: colors.accent },
+    });
+    outro.addShape(pptx.ShapeType.ellipse, {
+      x: 0.72,
+      y: 0.62,
+      w: 0.54,
+      h: 0.54,
+      line: { color: colors.accent, transparency: 100 },
+      fill: { color: colors.accent },
+    });
+    outro.addText("A", {
+      x: 0.72,
+      y: 0.685,
+      w: 0.54,
+      h: 0.28,
+      fontFace: "Aptos Display",
+      fontSize: 15,
+      bold: true,
+      align: "center",
+      color: colors.white,
+      margin: 0,
+    });
+    outro.addText("AUTOTUTORIAL AI", {
+      x: 1.42,
+      y: 0.69,
+      w: 2.4,
+      h: 0.25,
+      fontFace: "Aptos",
+      fontSize: 10,
+      bold: true,
+      charSpacing: 1.8,
+      color: "BFC7D5",
+      margin: 0,
+    });
+    outro.addText("TUTORIAL COMPLETE", {
+      x: 0.78,
+      y: 1.72,
+      w: 3.4,
+      h: 0.3,
+      fontFace: "Aptos",
+      fontSize: 11,
+      bold: true,
+      charSpacing: 2.2,
+      color: "A5B4FC",
+      margin: 0,
+    });
+    outro.addText("Thank you", {
+      x: 0.75,
+      y: 2.18,
+      w: 11.6,
+      h: 1.35,
+      fontFace: "Aptos Display",
+      fontSize: 38,
+      bold: true,
+      color: colors.white,
+      fit: "shrink",
+      margin: 0,
+    });
+    outro.addText(t.name, {
+      x: 0.78,
+      y: 3.78,
+      w: 8.4,
+      h: 0.5,
+      fontFace: "Aptos",
+      fontSize: 17,
+      color: "C8D0DC",
+      fit: "shrink",
+      margin: 0,
+    });
+    outro.addShape(pptx.ShapeType.line, {
+      x: 0.78,
+      y: 5.08,
+      w: 11.75,
+      h: 0,
+      line: { color: "344054", width: 1 },
+    });
+    outro.addText(`${String(slideCount).padStart(2, "0")} STEPS COMPLETED`, {
+      x: 0.78,
+      y: 5.5,
+      w: 3.1,
+      h: 0.36,
+      fontFace: "Aptos",
+      fontSize: 14,
+      bold: true,
+      color: colors.white,
+      margin: 0,
+    });
+    outro.addText("END OF GUIDE", {
+      x: 0.8,
+      y: 6.03,
+      w: 2,
+      h: 0.25,
+      fontFace: "Aptos",
+      fontSize: 9,
+      bold: true,
+      charSpacing: 1.3,
+      color: "98A2B3",
+      margin: 0,
+    });
   }
   const output = await pptx.write({ outputType: "nodebuffer", compression: false });
   if (output instanceof Buffer) return output.buffer.slice(output.byteOffset, output.byteOffset + output.byteLength) as ArrayBuffer;
