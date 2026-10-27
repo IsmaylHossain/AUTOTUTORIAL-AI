@@ -135,25 +135,55 @@ function readActions(id: string) {
 
 function meaningfulActions(actions: any[]) {
   const types = ["click", "input", "select", "change", "navigation"];
-  return actions.flatMap((action: any, sourceIndex: number) => {
-      if (!types.includes(action.type)) return [];
-      const safe = { ...action };
-      delete safe.value;
-      delete safe.selectedText;
-      if (safe.sensitive) safe.text = "[protected control]";
-      if (safe.type === "click") {
-        for (let index = sourceIndex + 1; index < actions.length; index++) {
-          const candidate = actions[index];
-          if (candidate?.url && candidate.url !== action.url) {
-            safe.resultUrl = candidate.url;
-            safe.resultTitle = candidate.title;
-            break;
-          }
-          if (types.includes(candidate?.type)) break;
+  let recordedActionIndex = -1;
+  const meaningful = actions.flatMap((action: any, sourceIndex: number) => {
+    if (!types.includes(action.type)) return [];
+    recordedActionIndex++;
+    const safe = { ...action, recordedActionIndex };
+    delete safe.value;
+    delete safe.selectedText;
+    if (safe.sensitive) safe.text = "[protected control]";
+    if (safe.type === "click") {
+      for (let index = sourceIndex + 1; index < actions.length; index++) {
+        const candidate = actions[index];
+        if (candidate?.url && candidate.url !== action.url) {
+          safe.resultUrl = candidate.url;
+          safe.resultTitle = candidate.title;
+          break;
         }
+        if (types.includes(candidate?.type)) break;
       }
-      return [safe];
+    }
+    return [safe];
+  });
+  return meaningful.filter((action: any) => {
+    if (action.pickerOpen) {
+      const hasDateSelection = meaningful.some(
+        (candidate: any) =>
+          candidate.type === "click" &&
+          !candidate.pickerOpen &&
+          isCalendarAction(candidate) &&
+          Number(candidate.ts || 0) >= Number(action.ts || 0) &&
+          Number(candidate.ts || 0) - Number(action.ts || 0) <= 15000,
+      );
+      if (hasDateSelection) return false;
+    }
+    if (action.type !== "input") return true;
+    const dateHint = `${action.fieldLabel || ""} ${action.selector || ""} ${action.fieldKind || ""}`;
+    if (!/date|calendar|datepicker|date-picker|dp[-_]/i.test(dateHint))
+      return true;
+    return !meaningful.some((candidate: any) => {
+      if (candidate.type !== "click" || !candidate.pickerOpen) return false;
+      const elapsed = Math.abs(
+        Number(candidate.ts || 0) - Number(action.ts || 0),
+      );
+      if (elapsed > 15000) return false;
+      return (
+        (candidate.selector && candidate.selector === action.selector) ||
+        (candidate.fieldLabel && candidate.fieldLabel === action.fieldLabel)
+      );
     });
+  });
 }
 
 const copySchema = {
@@ -517,7 +547,9 @@ export async function analyze(id: string) {
           action: action.type,
           selector: action.selector,
           value: action.sensitive ? "[protected]" : undefined,
-          actionIndex: index,
+          actionIndex: Number.isInteger(action.recordedActionIndex)
+            ? action.recordedActionIndex
+            : index,
           textSource: usedLocalText ? "local" : "ai",
         };
       }),

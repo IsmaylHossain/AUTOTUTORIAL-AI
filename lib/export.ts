@@ -99,7 +99,8 @@ export async function createPptx(id: string): Promise<ArrayBuffer> {
         .sort()
         .filter((name) => fs.statSync(path.join(screenshotDir, name)).isFile())
     : [];
-  const actions = readActions(id).filter((action) =>
+  const recordedActions = readActions(id);
+  const actions = recordedActions.filter((action) =>
     ["click", "input", "select", "change", "navigation"].includes(
       action.type,
     ),
@@ -281,8 +282,41 @@ export async function createPptx(id: string): Promise<ArrayBuffer> {
       const metadata = await sharp(file).metadata();
       const sourceWidth = metadata.width || action?.viewportWidth || 1440;
       const sourceHeight = metadata.height || action?.viewportHeight || 800;
-      const viewportWidth = action?.viewportWidth || metadata.width || 1440;
-      const viewportHeight = action?.viewportHeight || metadata.height || 800;
+      let viewportReference: any;
+      let viewportDistance = Number.POSITIVE_INFINITY;
+      if (
+        !(
+          Number(action?.viewportWidth) > 0 &&
+          Number(action?.viewportHeight) > 0
+        )
+      ) {
+        for (const candidate of recordedActions) {
+          if (
+            !(
+              Number(candidate.viewportWidth) > 0 &&
+              Number(candidate.viewportHeight) > 0
+            )
+          )
+            continue;
+          const distance = Math.abs(
+            Number(candidate.ts || 0) - Number(action?.ts || 0),
+          );
+          if (distance < viewportDistance) {
+            viewportReference = candidate;
+            viewportDistance = distance;
+          }
+        }
+      }
+      const viewportWidth =
+        Number(action?.viewportWidth) ||
+        Number(viewportReference?.viewportWidth) ||
+        metadata.width ||
+        1440;
+      const viewportHeight =
+        Number(action?.viewportHeight) ||
+        Number(viewportReference?.viewportHeight) ||
+        metadata.height ||
+        800;
       const contentLeft = 0.6665;
       // Header ends at 1.18 in. The 0.08 in image frame padding starts
       // exactly 6 px (6 / 96 in) below it.
@@ -412,23 +446,21 @@ export async function createPptx(id: string): Promise<ArrayBuffer> {
         h: imageHeight,
       });
       if (
-        ["click", "select", "change"].includes(action?.type) &&
+        ["click", "input", "select", "change"].includes(action?.type) &&
         action.targetRect
       ) {
         const rect = action.targetRect;
-        const highlightX = imageX + (rect.x / viewportWidth) * imageWidth;
-        const highlightY = imageY + (rect.y / viewportHeight) * imageHeight;
-        const highlightWidth = (rect.width / viewportWidth) * imageWidth;
-        const highlightHeight = (rect.height / viewportHeight) * imageHeight;
-        const highlightLeft = Math.max(imageX, highlightX - 0.04);
-        const highlightTop = Math.max(imageY, highlightY - 0.04);
+        const scaleX = imageWidth / viewportWidth;
+        const scaleY = imageHeight / viewportHeight;
+        const highlightLeft = Math.max(imageX, imageX + rect.x * scaleX);
+        const highlightTop = Math.max(imageY, imageY + rect.y * scaleY);
         const highlightRight = Math.min(
           imageX + imageWidth,
-          highlightX + highlightWidth + 0.04,
+          imageX + (rect.x + rect.width) * scaleX,
         );
         const highlightBottom = Math.min(
           imageY + imageHeight,
-          highlightY + highlightHeight + 0.04,
+          imageY + (rect.y + rect.height) * scaleY,
         );
         slide.addShape(pptx.ShapeType.roundRect, {
           x: highlightLeft,

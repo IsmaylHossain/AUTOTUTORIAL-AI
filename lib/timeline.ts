@@ -19,6 +19,7 @@ export type TimelineAction = {
   viewportWidth?: number;
   viewportHeight?: number;
   targetRect?: { x: number; y: number; width: number; height: number };
+  focusRect?: { x: number; y: number; width: number; height: number };
   sensitive?: boolean;
   pickerOpen?: boolean;
 };

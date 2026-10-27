@@ -94,6 +94,50 @@ export function readMediaDuration(file: string): number {
   return 0;
 }
 
+export function readMediaDimensions(
+  file: string,
+): { width: number; height: number } | null {
+  if (!file || !fs.existsSync(file)) return null;
+  const ffprobe = ffprobePath();
+  if (ffprobe) {
+    try {
+      const output = execFileSync(
+        ffprobe,
+        [
+          '-v',
+          'error',
+          '-select_streams',
+          'v:0',
+          '-show_entries',
+          'stream=width,height',
+          '-of',
+          'csv=s=x:p=0',
+          file,
+        ],
+        { stdio: ['ignore', 'pipe', 'pipe'] },
+      )
+        .toString()
+        .trim();
+      const match = output.match(/^(\d+)x(\d+)$/);
+      if (match)
+        return { width: Number(match[1]), height: Number(match[2]) };
+    } catch {}
+  }
+  const ffmpeg = ffmpegPath();
+  if (!ffmpeg) return null;
+  try {
+    execFileSync(ffmpeg, ['-hide_banner', '-i', file], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  } catch (error: any) {
+    const output = `${error?.stderr || ''}\n${error?.stdout || ''}`;
+    const match = output.match(/Video:[^\n]*?\s(\d{2,5})x(\d{2,5})(?:[\s,])/);
+    if (match)
+      return { width: Number(match[1]), height: Number(match[2]) };
+  }
+  return null;
+}
+
 export async function waitForMediaDuration(file: string, timeoutMs = 20000, minBytes = 1024): Promise<number> {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {

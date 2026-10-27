@@ -8,6 +8,7 @@ import {
   ffmpegPath as resolveFfmpeg,
   normalizeWavHeader,
   readMediaDuration,
+  readMediaDimensions,
 } from "./media";
 
 const jobs = new Map<string, ChildProcess>();
@@ -210,6 +211,10 @@ export async function render(id: string) {
   const hasIntro = timeline.steps[0]?.action === "introduction";
   const introSec = hasIntro ? INTRO_DURATION_MS / 1000 : 0;
   const outputDur = sourceDur + introSec;
+  const sourceSize = readMediaDimensions(source) || {
+    width: timeline.width,
+    height: timeline.height,
+  };
   const filters: string[] = [];
   if (hasIntro) {
     const titleFile = path.join(d, "intro-title.txt");
@@ -229,25 +234,93 @@ export async function render(id: string) {
     start: number;
     end: number;
   }> = [];
+  const actionViewport = (action: any) => {
+    const ownWidth = Number(action.viewportWidth);
+    const ownHeight = Number(action.viewportHeight);
+    if (ownWidth > 0 && ownHeight > 0)
+      return { width: ownWidth, height: ownHeight };
+    let nearest: any;
+    let distance = Number.POSITIVE_INFINITY;
+    for (const candidate of timeline.actions) {
+      const width = Number(candidate.viewportWidth);
+      const height = Number(candidate.viewportHeight);
+      if (!(width > 0 && height > 0)) continue;
+      const candidateDistance = Math.abs(
+        Number(candidate.activeMs || 0) - Number(action.activeMs || 0),
+      );
+      if (candidateDistance < distance) {
+        nearest = candidate;
+        distance = candidateDistance;
+      }
+    }
+    return nearest
+      ? {
+          width: Number(nearest.viewportWidth),
+          height: Number(nearest.viewportHeight),
+        }
+      : sourceSize;
+  };
+  const isCalendarSelection = (action: any) =>
+    action.type === "click" &&
+    !action.pickerOpen &&
+    /calendar|datepicker|date-picker|dp--|flatpickr|react-datepicker/i.test(
+      `${action.selector || ""} ${action.controlRole || ""} ${action.controlLabel || ""}`,
+    );
+  const duplicateDatePickerOpen = (action: any) =>
+    !!action.pickerOpen &&
+    timeline.actions.some(
+      (candidate) =>
+        isCalendarSelection(candidate) &&
+        Number(candidate.activeMs || 0) >= Number(action.activeMs || 0) &&
+        Number(candidate.activeMs || 0) - Number(action.activeMs || 0) <= 15000,
+    );
   const focusActions = timeline.actions.filter(
     (action) =>
-      action.targetRect && ["click", "select", "change"].includes(action.type),
+      action.targetRect &&
+      !duplicateDatePickerOpen(action) &&
+      ["click", "input", "select", "change"].includes(action.type),
   );
   for (const [index, action] of focusActions.entries()) {
-    const rect = action.targetRect!;
-    const width = Math.max(14, Math.ceil(rect.width + 8));
-    const height = Math.max(14, Math.ceil(rect.height + 8));
-    const radius = Math.max(5, Math.min(12, (height - 3) / 2));
-    const clickAt = introSec + Math.max(0, Number(action.activeMs || 0) / 1000);
+    const rect =
+      action.type === "input" && action.focusRect
+        ? action.focusRect
+        : action.targetRect!;
+    const viewport = actionViewport(action);
+    const scale = Math.min(
+      sourceSize.width / viewport.width,
+      sourceSize.height / viewport.height,
+    );
+    const padding = 0;
+    const borderWidth = 3;
+    const rightPadding = 1;
+    const bottomPadding = 2;
+    const width = Math.max(
+      borderWidth + 1,
+      Math.ceil(rect.width * scale + padding * 2 + rightPadding),
+    );
+    const height = Math.max(
+      borderWidth + 1,
+      Math.ceil(rect.height * scale + padding * 2 + bottomPadding),
+    );
+    const radius = Math.min(
+      6,
+      Math.max(2, (height - borderWidth) / 2),
+    );
+    const highlightMs =
+      action.type === "input"
+        ? Number(action.activeMs || 0)
+        : Number(action.screenshotMs ?? action.activeMs ?? 0);
+    const clickAt = introSec + Math.max(0, highlightMs / 1000);
     const file = path.join(d, `.focus-${index}.png`);
-    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}"><rect x="1.5" y="1.5" width="${width - 3}" height="${height - 3}" rx="${radius}" ry="${radius}" fill="none" stroke="#38BDF8" stroke-width="3"/></svg>`;
+    const halfStroke = borderWidth / 2;
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}"><rect x="${halfStroke}" y="${halfStroke}" width="${width - borderWidth}" height="${height - borderWidth}" rx="${radius}" ry="${radius}" fill="none" stroke="#38BDF8" stroke-width="${borderWidth}"/></svg>`;
     await sharp(Buffer.from(svg)).png().toFile(file);
     focusOverlays.push({
       file,
-      x: Math.max(0, rect.x - 4),
-      y: Math.max(0, rect.y - 4),
-      start: Math.max(0, clickAt - 0.28),
-      end: clickAt + 0.02,
+      x: Math.max(0, rect.x * scale - padding),
+      y: Math.max(0, rect.y * scale - padding),
+      start: Math.max(0, clickAt - 0.45),
+      end: clickAt + 0.05,
     });
   }
   for (const a of timeline.actions.filter((a) => a.sensitive && a.targetRect)) {
