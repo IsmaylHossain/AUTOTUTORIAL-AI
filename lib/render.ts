@@ -4,6 +4,7 @@ import path from "path";
 import sharp from "sharp";
 import { dir, get, save, settings } from "./store";
 import { buildTimeline, INTRO_DURATION_MS } from "./timeline";
+import { generateTTS } from "./tts";
 import {
   ffmpegPath as resolveFfmpeg,
   normalizeWavHeader,
@@ -11,12 +12,56 @@ import {
   readMediaDimensions,
 } from "./media";
 
-const jobs = new Map<string, ChildProcess>();
+type RenderJob = { cancelled: boolean; process?: ChildProcess };
+const renderGlobal = globalThis as typeof globalThis & {
+  tutorialRenderJobs?: Map<string, RenderJob>;
+};
+const jobs = renderGlobal.tutorialRenderJobs ||= new Map<string, RenderJob>();
+function checkCancelled(id: string) {
+  if (jobs.get(id)?.cancelled) throw new Error("Render cancelled.");
+}
+export function renderActive(id: string) {
+  return jobs.has(id);
+}
+export function recoverRender(id: string) {
+  const t = get(id);
+  if (t?.status === "rendering" && !renderActive(id)) {
+    t.status = "review";
+    t.stage = "steps";
+    t.message = "Render interrupted by a server restart. Please render again.";
+    save(t);
+  }
+  return t;
+}
+export function startRender(id: string) {
+  if (jobs.has(id)) return false;
+  const t = get(id);
+  if (!t) throw new Error("Tutorial not found.");
+  if (!t.recording) throw new Error("Recording video not found.");
+  jobs.set(id, { cancelled: false });
+  t.status = "rendering";
+  t.stage = "rendering";
+  t.progress = 0;
+  t.message = "Starting render…";
+  try { save(t); } catch (error) { jobs.delete(id); throw error; }
+  void render(id).catch((error) => {
+    const current = get(id);
+    if (current) {
+      current.status = "review";
+      current.stage = "steps";
+      current.message = jobs.get(id)?.cancelled
+        ? "Render cancelled. Your recording and edits are still saved."
+        : `Render failed: ${error.message}`;
+      save(current);
+    }
+  }).finally(() => jobs.delete(id));
+  return true;
+}
 export function cancelRender(id: string) {
-  const p = jobs.get(id);
-  if (!p) return false;
-  p.kill("SIGTERM");
-  jobs.delete(id);
+  const job = jobs.get(id);
+  if (!job) return false;
+  job.cancelled = true;
+  job.process?.kill("SIGTERM");
   const t = get(id);
   if (t) {
     t.status = "review";
@@ -45,13 +90,14 @@ async function createVideoCard(
   projectName: string,
   kind: "opening" | "intro" | "outro",
   templateImage?: string,
+  welcomeTitle?: string,
 ) {
-  const name = escapeXml(projectName);
+  const titleLength = welcomeTitle?.length || projectName.length + 12;
   const titleSize = Math.max(
     Math.round(width * 0.018),
     Math.min(
       Math.round(width * 0.043),
-      Math.round((width * 0.68) / Math.max(18, (projectName.length + 12) * 0.58)),
+      Math.round((width * 0.68) / Math.max(18, titleLength * 0.58)),
     ),
   );
   const mainSize = Math.max(26, Math.round(width * 0.043));
@@ -61,7 +107,7 @@ async function createVideoCard(
       <linearGradient id="default" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#111b32"/><stop offset="0.52" stop-color="#18234a"/><stop offset="1" stop-color="#0b1220"/></linearGradient>
     </defs>
     ${templateImage ? "" : '<rect width="100%" height="100%" fill="url(#default)"/><circle cx="88%" cy="14%" r="26%" fill="#6366f1" opacity="0.13"/><circle cx="12%" cy="88%" r="31%" fill="#38bdf8" opacity="0.08"/><rect width="100%" height="100%" fill="url(#shade)"/>'}
-    ${kind === "opening" ? "" : kind === "outro" ? `<rect x="${Math.round(width * 0.31)}" y="${Math.round(height * 0.69)}" width="${Math.round(width * 0.38)}" height="${Math.round(height * 0.19)}" rx="${Math.max(10, Math.round(width * 0.01))}" fill="#08111f" fill-opacity="0.9" stroke="#ffffff" stroke-opacity="0.28"/><line x1="${Math.round(width * 0.425)}" y1="${Math.round(height * 0.735)}" x2="${Math.round(width * 0.575)}" y2="${Math.round(height * 0.735)}" stroke="#38bdf8" stroke-width="${Math.max(3, Math.round(width * 0.003))}" stroke-linecap="round"/><text x="${Math.round(width / 2)}" y="${Math.round(height * 0.83)}" text-anchor="middle" fill="#ffffff" font-family="Arial, sans-serif" font-size="${mainSize}" font-weight="700">Thank you</text>` : `<rect x="${Math.round(width * 0.12)}" y="${Math.round(height * 0.68)}" width="${Math.round(width * 0.76)}" height="${Math.round(height * 0.2)}" rx="${Math.max(10, Math.round(width * 0.01))}" fill="#08111f" fill-opacity="0.9" stroke="#ffffff" stroke-opacity="0.28"/><line x1="${Math.round(width * 0.425)}" y1="${Math.round(height * 0.725)}" x2="${Math.round(width * 0.575)}" y2="${Math.round(height * 0.725)}" stroke="#38bdf8" stroke-width="${Math.max(3, Math.round(width * 0.003))}" stroke-linecap="round"/><text x="${Math.round(width / 2)}" y="${Math.round(height * 0.83)}" text-anchor="middle" fill="#ffffff" font-family="Arial, sans-serif" font-size="${titleSize}" font-weight="700">Welcome to &apos;${name}&apos; Tutorial.</text>`}
+    ${kind === "opening" ? "" : kind === "outro" ? `<rect x="${Math.round(width * 0.31)}" y="${Math.round(height * 0.69)}" width="${Math.round(width * 0.38)}" height="${Math.round(height * 0.19)}" rx="${Math.max(10, Math.round(width * 0.01))}" fill="#08111f" fill-opacity="0.9" stroke="#ffffff" stroke-opacity="0.28"/><line x1="${Math.round(width * 0.425)}" y1="${Math.round(height * 0.735)}" x2="${Math.round(width * 0.575)}" y2="${Math.round(height * 0.735)}" stroke="#38bdf8" stroke-width="${Math.max(3, Math.round(width * 0.003))}" stroke-linecap="round"/><text x="${Math.round(width / 2)}" y="${Math.round(height * 0.83)}" text-anchor="middle" fill="#ffffff" font-family="Arial, sans-serif" font-size="${mainSize}" font-weight="700">Thank you</text>` : `<rect x="${Math.round(width * 0.12)}" y="${Math.round(height * 0.68)}" width="${Math.round(width * 0.76)}" height="${Math.round(height * 0.2)}" rx="${Math.max(10, Math.round(width * 0.01))}" fill="#08111f" fill-opacity="0.9" stroke="#ffffff" stroke-opacity="0.28"/><line x1="${Math.round(width * 0.425)}" y1="${Math.round(height * 0.725)}" x2="${Math.round(width * 0.575)}" y2="${Math.round(height * 0.725)}" stroke="#38bdf8" stroke-width="${Math.max(3, Math.round(width * 0.003))}" stroke-linecap="round"/><text x="${Math.round(width / 2)}" y="${Math.round(height * 0.83)}" text-anchor="middle" fill="#ffffff" font-family="Arial, sans-serif" font-size="${titleSize}" font-weight="700">${escapeXml(welcomeTitle || `Welcome to \'${projectName}\' Tutorial.`)}</text>`}
   </svg>`;
   const composition = templateImage
     ? sharp(templateImage).resize(width, height, {
@@ -110,10 +156,15 @@ async function runFfmpeg(
   startPct: number,
   endPct: number,
 ) {
+  checkCancelled(id);
   const ffmpegPath = ensureTools();
   return await new Promise<void>((resolve, reject) => {
-    const proc = spawn(ffmpegPath, args, { stdio: ["ignore", "pipe", "pipe"] });
-    jobs.set(id, proc);
+    const logPath = path.join(dir(id), "render.log");
+    fs.appendFileSync(logPath, `\n${new Date().toISOString()} ${label}\n`);
+    const proc = spawn(ffmpegPath, ["-filter_complex_threads", "1", ...args], { stdio: ["ignore", "pipe", "pipe"] });
+    const job = jobs.get(id);
+    if (job) job.process = proc;
+    let lastProgress = -1;
     let err = "";
     let buf = "";
     proc.stdout.on("data", (chunk) => {
@@ -130,8 +181,9 @@ async function runFfmpeg(
                   Math.min(1, Math.max(0, us / 1000000 / sourceDur)),
             );
             const t = get(id);
-            if (t) {
-              t.progress = Math.min(99, Math.max(1, pct));
+            if (t && !job?.cancelled && pct !== lastProgress) {
+              lastProgress = pct;
+              t.progress = Math.max(t.progress || 0, Math.min(99, Math.max(1, pct)));
               t.stage = "rendering";
               t.message = `${label} · ${t.progress}%`;
               save(t);
@@ -142,13 +194,15 @@ async function runFfmpeg(
     });
     proc.stderr.on("data", (c) => {
       err = (err + c.toString()).slice(-24000);
+      fs.appendFileSync(logPath, c.toString());
     });
     proc.on("error", (e) => {
-      jobs.delete(id);
+      if (job) job.process = undefined;
       reject(new Error(`FFmpeg could not start: ${e.message}`));
     });
     proc.on("close", (code) => {
-      jobs.delete(id);
+      if (job) job.process = undefined;
+      if (job?.cancelled) { reject(new Error("Render cancelled.")); return; }
       if (code === 0 && fs.existsSync(out) && fs.statSync(out).size > 1024)
         resolve();
       else reject(new Error(err || `FFmpeg exited with code ${code}`));
@@ -161,20 +215,23 @@ async function prepareSource(id: string, recording: string, rawDur: number) {
     rawDur,
     Math.max(0, (t.videoStartOffsetMs || 0) / 1000),
   );
+  const stop = Number.isFinite(t.recordingStopMs)
+    ? Math.min(rawDur, offset + Math.max(0, t.recordingStopMs!) / 1000)
+    : rawDur;
   const pauses = (t.pauseIntervals || [])
     .map((p) => ({
-      start: offset + Math.max(0, p.startMs / 1000),
-      end: Math.min(rawDur, offset + Math.max(0, (p.endMs ?? 0) / 1000)),
+      start: Math.min(stop, offset + Math.max(0, p.startMs / 1000)),
+      end: Math.min(stop, offset + Math.max(0, (p.endMs ?? t.recordingStopMs ?? rawDur * 1000) / 1000)),
     }))
     .filter((p) => p.end > p.start);
-  if (!pauses.length && offset === 0) return recording;
+  if (!pauses.length && offset === 0 && stop === rawDur) return recording;
   const ranges: { start: number; end: number }[] = [];
   let cursor = offset;
   for (const p of pauses) {
     if (p.start > cursor) ranges.push({ start: cursor, end: p.start });
     cursor = Math.max(cursor, p.end);
   }
-  if (cursor < rawDur) ranges.push({ start: cursor, end: rawDur });
+  if (cursor < stop) ranges.push({ start: cursor, end: stop });
   if (!ranges.length)
     throw new Error(
       "The recording contains no active video after removing startup and paused intervals.",
@@ -222,15 +279,16 @@ async function prepareSource(id: string, recording: string, rawDur: number) {
   return out;
 }
 export async function render(id: string) {
-  const t = get(id);
+  let t = get(id);
   if (!t) throw new Error("Tutorial not found");
   if (!t.recording || !fs.existsSync(t.recording))
     throw new Error("Recording video not found.");
   ensureVideo(t.recording);
   const d = dir(id),
-    out = path.join(d, "tutorial.mp4"),
+    out = path.join(d, "tutorial-rendering.mp4"),
     fallback = path.join(d, "tutorial-clean.mp4");
   const rawDur = await duration(t.recording);
+  checkCancelled(id);
   if (rawDur <= 0)
     throw new Error(
       "The browser recording is still finalizing or is incomplete. Please wait a moment and try the render again.",
@@ -239,11 +297,22 @@ export async function render(id: string) {
   t.status = "rendering";
   t.message = "Starting final video render…";
   t.progress = 1;
-  t.video = undefined;
-  t.videoOpeningMs = undefined;
   save(t);
+  if (!(t.music && fs.existsSync(t.music))) {
+    for (let index = 0; index < t.steps.length; index++) {
+      checkCancelled(id);
+      const step = t.steps[index];
+      const text = String(step.instruction || step.title || "").trim();
+      if (!step.audio || !fs.existsSync(step.audio) ||
+          (step.audioText !== undefined && step.audioText !== text)) {
+        await generateTTS(id, index);
+      }
+    }
+    checkCancelled(id);
+    t = get(id)!;
+  }
   const timeline = buildTimeline(id);
-  const source = await prepareSource(id, t.recording, rawDur);
+  const source = await prepareSource(id, t.recording!, rawDur);
   const sourceDur = await duration(source);
   if (sourceDur <= 0)
     throw new Error("The active recording has no readable duration.");
@@ -322,8 +391,13 @@ export async function render(id: string) {
         Number(candidate.activeMs || 0) >= Number(action.activeMs || 0) &&
         Number(candidate.activeMs || 0) - Number(action.activeMs || 0) <= 15000,
     );
+  const recordedInteractions = timeline.actions.filter(action =>
+    ["click", "input", "select", "change", "navigation"].includes(action.type));
+  const includedActions = new Set(timeline.steps.filter(step => step.action !== "introduction")
+    .map((step, index) => recordedInteractions[Number.isInteger(step.actionIndex) ? step.actionIndex! : index]));
   const focusActions = timeline.actions.filter(
     (action) =>
+      includedActions.has(action) &&
       action.targetRect &&
       !duplicateDatePickerOpen(action) &&
       ["click", "input", "select", "change"].includes(action.type),
@@ -405,6 +479,7 @@ export async function render(id: string) {
       t.name,
       "intro",
       hasTemplate ? t.templateImage : undefined,
+      timeline.steps.find(step => step.action === "introduction")?.title,
     );
   if (outroCard)
     await createVideoCard(
@@ -423,21 +498,19 @@ export async function render(id: string) {
   let outroInputIndex: number | undefined;
   if (openingCard) {
     openingInputIndex = nextInputIndex++;
-    visualInputs.push("-loop", "1", "-framerate", String(timeline.fps), "-i", openingCard);
+    visualInputs.push("-framerate", String(timeline.fps), "-i", openingCard);
   }
   if (introCard) {
     introInputIndex = nextInputIndex++;
-    visualInputs.push("-loop", "1", "-framerate", String(timeline.fps), "-i", introCard);
+    visualInputs.push("-framerate", String(timeline.fps), "-i", introCard);
   }
   if (outroCard) {
     outroInputIndex = nextInputIndex++;
-    visualInputs.push("-loop", "1", "-framerate", String(timeline.fps), "-i", outroCard);
+    visualInputs.push("-framerate", String(timeline.fps), "-i", outroCard);
   }
   const focusInputStart = nextInputIndex;
   for (const overlay of focusOverlays)
     visualInputs.push(
-      "-loop",
-      "1",
       "-framerate",
       String(timeline.fps),
       "-i",
@@ -507,6 +580,8 @@ export async function render(id: string) {
       78,
     );
   } catch (primary: any) {
+    checkCancelled(id);
+    t.progress = get(id)?.progress || t.progress;
     t.message = "Visual effects failed; creating a clean MP4 fallback…";
     save(t);
     try {
@@ -520,15 +595,15 @@ export async function render(id: string) {
         let cleanOutroInput: number | undefined;
         if (openingCard) {
           cleanOpeningInput = cleanNextInput++;
-          clean.push("-loop", "1", "-framerate", String(timeline.fps), "-i", openingCard);
+          clean.push("-framerate", String(timeline.fps), "-i", openingCard);
         }
         if (introCard) {
           cleanIntroInput = cleanNextInput++;
-          clean.push("-loop", "1", "-framerate", String(timeline.fps), "-i", introCard);
+          clean.push("-framerate", String(timeline.fps), "-i", introCard);
         }
         if (outroCard) {
           cleanOutroInput = cleanNextInput++;
-          clean.push("-loop", "1", "-framerate", String(timeline.fps), "-i", outroCard);
+          clean.push("-framerate", String(timeline.fps), "-i", outroCard);
         }
         cleanGraph.push(
           `[0:v]tpad=start_duration=${leadInSec}:start_mode=clone${outroSec ? `,tpad=stop_duration=${outroSec}:stop_mode=clone` : ""}[cleanBase]`,
@@ -587,6 +662,7 @@ export async function render(id: string) {
       );
       fs.renameSync(fallback, out);
     } catch (fallbackErr: any) {
+      checkCancelled(id);
       t.status = "review";
       t.stage = "steps";
       t.progress = 0;
@@ -649,37 +725,26 @@ export async function render(id: string) {
       fs.renameSync(withMusic, out);
       musicApplied = true;
     } catch {
+      checkCancelled(id);
       fs.rmSync(withMusic, { force: true });
+      t.progress = get(id)?.progress || t.progress;
       t.message = "Music mix failed; falling back to step narration.";
       save(t);
     }
   }
-  const audioFiles = (timeline.steps || [])
-    .map((s, i) => {
-      if (s.action === "introduction" && !s.audio) return "";
-      return s.audio && fs.existsSync(s.audio)
-        ? s.audio
-        : path.join(d, "audio", `step-${String(i + 1).padStart(3, "0")}.wav`);
-    })
-    .filter((p) => fs.existsSync(p));
-  for (const file of audioFiles) normalizeWavHeader(file);
-  if (!musicApplied && audioFiles.length) {
+  const audioEntries = timeline.steps.flatMap(step =>
+    step.audio && fs.existsSync(step.audio) ? [{ file: step.audio, step }] : []);
+  for (const { file } of audioEntries) normalizeWavHeader(file);
+  if (!musicApplied && audioEntries.length) {
     const narrated = path.join(d, "tutorial-narrated.mp4");
     const inputs = ["-y", "-i", out];
     const labels: string[] = [];
     const graph: string[] = [];
-    audioFiles.forEach((file, j) => {
+    audioEntries.forEach(({ file, step }, j) => {
       inputs.push("-i", file);
-      const step = timeline.steps.findIndex((s) => s.audio === file);
-      const st = timeline.steps[step >= 0 ? step : j];
-      const delay = Math.max(
-        0,
-        Math.round((Number(st?.startMs) || 0) + openingSec * 1000),
-      );
+      const delay = Math.max(0, Math.round((Number(step.startMs) || 0) + openingSec * 1000));
       const label = `a${j}`;
-      graph.push(
-        `[${j + 1}:a]adelay=${delay}:all=1,aresample=async=1[${label}]`,
-      );
+      graph.push(`[${j + 1}:a]adelay=${delay}:all=1,aresample=async=1[${label}]`);
       labels.push(`[${label}]`);
     });
     graph.push(
@@ -710,16 +775,23 @@ export async function render(id: string) {
       await runFfmpeg(id, mix, outputDur, "Adding narration", narrated, 78, 99);
       fs.renameSync(narrated, out);
     } catch (e) {
+      checkCancelled(id);
+      t.progress = get(id)?.progress || t.progress;
       t.message = "Narration mix failed; keeping the valid visual MP4.";
       save(t);
     }
   }
-  t.video = out;
+  checkCancelled(id);
+  if (readMediaDuration(out) <= 0) throw new Error("Rendered video could not be verified.");
+  const finalOutput = path.join(d, "tutorial.mp4");
+  fs.renameSync(out, finalOutput);
+  t.video = finalOutput;
+  t.videoUpdatedAt = Date.now();
   t.videoOpeningMs = openingSec * 1000;
   t.status = "ready";
   t.stage = "ready";
   t.progress = 100;
   t.message = "Final tutorial video is ready.";
   save(t);
-  return out;
+  return finalOutput;
 }

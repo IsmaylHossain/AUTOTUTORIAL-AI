@@ -17,6 +17,7 @@ export type Step = {
   selector?: string;
   value?: string;
   audio?: string;
+  audioText?: string;
   actionIndex?: number;
   textSource?: "ai" | "local";
   voiceSource?: "edge" | "ai" | "local";
@@ -54,12 +55,14 @@ export type Tutorial = {
   steps: Step[];
   recording?: string;
   video?: string;
+  videoUpdatedAt?: number;
   videoOpeningMs?: number;
   templateImage?: string;
   music?: string;
   musicName?: string;
   recordingStartedAt?: number;
   videoStartOffsetMs?: number;
+  recordingStopMs?: number;
   pauseIntervals?: PauseInterval[];
 };
 

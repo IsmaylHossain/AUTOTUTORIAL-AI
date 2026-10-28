@@ -130,6 +130,7 @@ export async function createPptx(id: string): Promise<ArrayBuffer> {
     stepSlides.push({ step, action, name });
   }
   const slideCount = stepSlides.length;
+  const welcome = t.steps.find(step => step.action === "introduction");
   const templateImage =
     t.templateImage && fs.existsSync(t.templateImage)
       ? fs.readFileSync(t.templateImage)
@@ -178,7 +179,7 @@ export async function createPptx(id: string): Promise<ArrayBuffer> {
       h: 0,
       line: { color: colors.focus, width: 2.5 },
     });
-    intro.addText(`Welcome to '${t.name}' Tutorial.`, {
+    intro.addText(welcome?.title || `Welcome to '${t.name}' Tutorial.`, {
       x: 1.85,
       y: 5.91,
       w: 9.63,
@@ -246,7 +247,7 @@ export async function createPptx(id: string): Promise<ArrayBuffer> {
     color: "A5B4FC",
     margin: 0,
   });
-  intro.addText(t.name, {
+  intro.addText(welcome?.title || t.name, {
     x: 0.75,
     y: 2.18,
     w: 11.6,
@@ -260,7 +261,7 @@ export async function createPptx(id: string): Promise<ArrayBuffer> {
     margin: 0,
   });
   intro.addText(
-    "A clear, step-by-step guide generated from the recorded workflow.",
+    welcome?.instruction || "A clear, step-by-step guide generated from the recorded workflow.",
     {
       x: 0.78,
       y: 3.78,

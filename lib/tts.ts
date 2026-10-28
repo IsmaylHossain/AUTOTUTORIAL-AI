@@ -1,5 +1,6 @@
 import fs from "fs";
 import path from "path";
+import { randomUUID } from "crypto";
 import { spawn } from "child_process";
 import { MsEdgeTTS, OUTPUT_FORMAT } from "msedge-tts";
 import { dir, get, save, settings } from "./store";
@@ -206,7 +207,7 @@ export async function generateTTS(id: string, index: number) {
   const base = path.join(
     dir(id),
     "audio",
-    `step-${String(index + 1).padStart(3, "0")}`,
+    `step-${String(index + 1).padStart(3, "0")}-${randomUUID()}`,
   );
   const wav = `${base}.wav`;
   const merged = { ...settings(), ...(t.settings || {}) };
@@ -231,6 +232,7 @@ export async function generateTTS(id: string, index: number) {
     throw new Error("Microsoft Edge and local narration both returned empty audio.");
   normalizeWavHeader(output);
   step.audio = output;
+  step.audioText = text;
   step.voiceSource = voiceSource;
   save(t);
   return output;

@@ -34,7 +34,11 @@ export default function TutorialPage() {
   const videoRef = useRef<HTMLVideoElement>(null);
   async function load() {
     const r = await fetch(`/api/tutorial?id=${id}`, { cache: "no-store" });
-    if (r.ok) setT(await r.json());
+    if (r.ok) {
+      const tutorial = await r.json();
+      setT(tutorial);
+      setRendering(tutorial.status === "rendering");
+    }
     const a = await fetch(`/api/assets?id=${id}`, { cache: "no-store" });
     if (a.ok) setAssets(await a.json());
   }
@@ -48,12 +52,13 @@ export default function TutorialPage() {
       if (r.ok) {
         const d = await r.json();
         setT((v: any) => (v ? { ...v, ...d } : d));
-        if (d.status === "ready" || d.status === "review") {
+        if (!d.active && (d.status === "ready" || d.status === "review")) {
+          setMsg(d.message || "Render finished.");
           setRendering(false);
           load();
         }
       }
-    }, 800);
+    }, 1500);
     return () => clearInterval(x);
   }, [rendering, id]);
   async function save() {
@@ -114,8 +119,7 @@ export default function TutorialPage() {
       load();
       return;
     }
-    setRendering(false);
-    setMsg("Final video is ready.");
+    setMsg(d.started ? "Rendering final video…" : "This project is already rendering.");
     await load();
   }
   async function renameTutorial() {

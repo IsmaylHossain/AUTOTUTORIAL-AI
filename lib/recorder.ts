@@ -383,7 +383,7 @@ export async function startRecording(id: string, url: string) {
       if (!isCapture && !isAction && !isWindow) return;
       try {
         const current = sessions.get(id);
-        if (!current) return;
+        if (!current || current.stopping) return;
         if (isWindow) {
           const event = JSON.parse(text.slice("AUTOTUTORIAL_WINDOW:".length));
           if (event.state === "focus")
@@ -480,7 +480,7 @@ export async function startRecording(id: string, url: string) {
         fs.appendFileSync(p, JSON.stringify(action) + "\n");
         if (action.type === "move") return;
         const tt = get(id);
-        if (tt) {
+        if (tt && !current.stopping) {
           tt.status = "recording";
           tt.stage = "recording";
           tt.message = `${countActions(id)} actions captured`;
@@ -671,6 +671,11 @@ export async function stopRecording(id: string) {
   }
   s.stopping = true;
   const stoppedAt = Date.now();
+  const stoppedTutorial = get(id);
+  if (stoppedTutorial) {
+    stoppedTutorial.recordingStopMs = Math.max(0, stoppedAt - s.started);
+    save(stoppedTutorial);
+  }
   const lastSegment = s.windowSegments.at(-1);
   if (lastSegment && !lastSegment.endAt)
     lastSegment.endAt = Math.max(lastSegment.startAt, stoppedAt);

@@ -7,7 +7,7 @@ export async function GET(req: Request) {
   if (!t) return NextResponse.json({ error: "Not found" }, { status: 404 });
   return NextResponse.json({
     ...t,
-    videoUrl: t.video ? `/api/video?id=${encodeURIComponent(id)}` : null,
+    videoUrl: t.video ? `/api/video?id=${encodeURIComponent(id)}&v=${t.videoUpdatedAt || 0}` : null,
     templateImageUrl: t.templateImage
       ? `/api/tutorial/template?id=${encodeURIComponent(id)}`
       : null,

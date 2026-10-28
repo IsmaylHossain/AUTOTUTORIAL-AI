@@ -1,12 +1,14 @@
 import { NextResponse } from "next/server";
 import { generateTTS } from "../../../lib/tts";
 import { get } from "../../../lib/store";
+import { renderActive } from "../../../lib/render";
 
 export const runtime = "nodejs";
 
 export async function POST(request: Request) {
   try {
     const { id, index } = await request.json();
+    if (renderActive(id)) return NextResponse.json({ error: "Cancel or finish the render before changing narration." }, { status: 409 });
     if (!id || !Number.isInteger(Number(index)) || Number(index) < 0)
       return NextResponse.json(
         { ok: false, error: "Invalid tutorial or step index." },
