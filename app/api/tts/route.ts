@@ -2,12 +2,14 @@ import { NextResponse } from "next/server";
 import { generateTTS } from "../../../lib/tts";
 import { get } from "../../../lib/store";
 import { renderActive } from "../../../lib/render";
+import { videoEditActive } from "../../../lib/video-edits";
 
 export const runtime = "nodejs";
 
 export async function POST(request: Request) {
   try {
     const { id, index } = await request.json();
+    if (videoEditActive(id)) return NextResponse.json({error:"Wait for video edits to finish saving."},{status:409});
     if (renderActive(id)) return NextResponse.json({ error: "Cancel or finish the render before changing narration." }, { status: 409 });
     if (!id || !Number.isInteger(Number(index)) || Number(index) < 0)
       return NextResponse.json(

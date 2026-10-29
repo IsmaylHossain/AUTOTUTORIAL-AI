@@ -45,8 +45,7 @@ export async function POST(req: Request) {
       .png({ compressionLevel: 9 })
       .toFile(output);
     tutorial.templateImage = output;
-    tutorial.video = undefined;
-    tutorial.videoOpeningMs = undefined;
+    tutorial.videoOutdated = !!tutorial.video;
     tutorial.status = "review";
     tutorial.stage = "steps";
     tutorial.message = "Template image saved. Render again to apply it to the video.";
@@ -70,8 +69,7 @@ export async function DELETE(req: Request) {
     return NextResponse.json({ error: "Tutorial not found." }, { status: 404 });
   if (tutorial.templateImage) fs.rmSync(tutorial.templateImage, { force: true });
   tutorial.templateImage = undefined;
-  tutorial.video = undefined;
-  tutorial.videoOpeningMs = undefined;
+  tutorial.videoOutdated = !!tutorial.video;
   tutorial.status = "review";
   tutorial.stage = "steps";
   tutorial.message = "Template image removed. Default covers will be used.";

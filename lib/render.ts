@@ -5,6 +5,8 @@ import sharp from "sharp";
 import { dir, get, save, settings } from "./store";
 import { buildTimeline, INTRO_DURATION_MS } from "./timeline";
 import { generateTTS } from "./tts";
+import { activeRecordingRanges } from "./recording-preview";
+import { videoEditActive } from "./video-edits";
 import {
   ffmpegPath as resolveFfmpeg,
   normalizeWavHeader,
@@ -34,6 +36,7 @@ export function recoverRender(id: string) {
   return t;
 }
 export function startRender(id: string) {
+  if (videoEditActive(id)) throw new Error("Wait for video edits to finish saving.");
   if (jobs.has(id)) return false;
   const t = get(id);
   if (!t) throw new Error("Tutorial not found.");
@@ -211,27 +214,8 @@ async function runFfmpeg(
 }
 async function prepareSource(id: string, recording: string, rawDur: number) {
   const t = get(id)!;
-  const offset = Math.min(
-    rawDur,
-    Math.max(0, (t.videoStartOffsetMs || 0) / 1000),
-  );
-  const stop = Number.isFinite(t.recordingStopMs)
-    ? Math.min(rawDur, offset + Math.max(0, t.recordingStopMs!) / 1000)
-    : rawDur;
-  const pauses = (t.pauseIntervals || [])
-    .map((p) => ({
-      start: Math.min(stop, offset + Math.max(0, p.startMs / 1000)),
-      end: Math.min(stop, offset + Math.max(0, (p.endMs ?? t.recordingStopMs ?? rawDur * 1000) / 1000)),
-    }))
-    .filter((p) => p.end > p.start);
-  if (!pauses.length && offset === 0 && stop === rawDur) return recording;
-  const ranges: { start: number; end: number }[] = [];
-  let cursor = offset;
-  for (const p of pauses) {
-    if (p.start > cursor) ranges.push({ start: cursor, end: p.start });
-    cursor = Math.max(cursor, p.end);
-  }
-  if (cursor < stop) ranges.push({ start: cursor, end: stop });
+  const ranges = activeRecordingRanges(t, rawDur);
+  if (ranges.length === 1 && ranges[0].start === 0 && ranges[0].end === rawDur) return recording;
   if (!ranges.length)
     throw new Error(
       "The recording contains no active video after removing startup and paused intervals.",
@@ -320,26 +304,33 @@ export async function render(id: string) {
   const quality = cfg.quality || "high";
   const crf = quality === "low" ? 24 : quality === "medium" ? 21 : 18;
   const preset = quality === "low" ? "faster" : quality === "medium" ? "fast" : "veryfast";
-  const hasIntro = timeline.steps[0]?.action === "introduction";
-  const introSec = hasIntro ? INTRO_DURATION_MS / 1000 : 0;
+  const welcomeStep = timeline.steps.find(step => step.action === "introduction");
+  const hasIntro = !!welcomeStep;
+  const introSec = hasIntro ? 3 : 0;
   const hasTemplate = !!(
     t.templateImage && fs.existsSync(t.templateImage)
   );
-  const openingSec = hasIntro && hasTemplate ? 3 : 0;
-  const outroSec = hasIntro && hasTemplate ? INTRO_DURATION_MS / 1000 : 0;
+  const openingSec = hasTemplate ? 2 : 0;
+  const outroSec = 3;
   const leadInSec = openingSec + introSec;
   const outputDur = sourceDur + leadInSec + outroSec;
+  // Fade only cover images; the recorded footage keeps its complete timeline.
+  const addCard = (graph: string[], input: number, base: string, name: string,
+    start: number, end: number, fadeIn = false) => {
+    const length = end - start;
+    graph.push(`[${input}:v]loop=loop=-1:size=1:start=0,trim=duration=${length.toFixed(3)},setpts=PTS-STARTPTS,format=rgba${fadeIn ? ",fade=t=in:st=0:d=0.3:alpha=1" : ""},setpts=PTS+${start.toFixed(3)}/TB[${name}Card]`);
+    graph.push(`${base}[${name}Card]overlay=0:0:eof_action=pass:repeatlast=0:enable='between(t,${start.toFixed(3)},${end.toFixed(3)})'[${name}]`);
+    return `[${name}]`;
+  };
   const sourceSize = readMediaDimensions(source) || {
     width: timeline.width,
     height: timeline.height,
   };
   const filters: string[] = [];
-  if (hasIntro) {
+  if (leadInSec || outroSec) {
     filters.push(
-      `tpad=start_duration=${leadInSec}:start_mode=clone`,
+      `tpad=start_duration=${leadInSec}:start_mode=clone:stop_duration=${outroSec}:stop_mode=clone`,
     );
-    if (outroSec)
-      filters.push(`tpad=stop_duration=${outroSec}:stop_mode=clone`);
   } else
     filters.push(
       `drawbox=x=0:y=0:w=iw:h=70:color=black@0.58:t=fill:enable='between(t,0,2.5)'`,
@@ -479,7 +470,7 @@ export async function render(id: string) {
       t.name,
       "intro",
       hasTemplate ? t.templateImage : undefined,
-      timeline.steps.find(step => step.action === "introduction")?.title,
+      welcomeStep?.instruction,
     );
   if (outroCard)
     await createVideoCard(
@@ -488,7 +479,7 @@ export async function render(id: string) {
       sourceSize.height,
       t.name,
       "outro",
-      t.templateImage,
+      hasTemplate ? t.templateImage : undefined,
     );
 
   const visualInputs = ["-y", "-i", source];
@@ -519,22 +510,13 @@ export async function render(id: string) {
   const visualGraph = [`[0:v]${filters.join(",")}[base]`];
   let visualOutput = "[base]";
   if (openingInputIndex !== undefined) {
-    visualGraph.push(
-      `${visualOutput}[${openingInputIndex}:v]overlay=x=0:y=0:enable='between(t,0,${openingSec.toFixed(3)})'[coveredOpening]`,
-    );
-    visualOutput = "[coveredOpening]";
+    visualOutput = addCard(visualGraph, openingInputIndex, visualOutput, "coveredOpening", 0, openingSec);
   }
   if (introInputIndex !== undefined) {
-    visualGraph.push(
-      `${visualOutput}[${introInputIndex}:v]overlay=x=0:y=0:enable='between(t,${openingSec.toFixed(3)},${leadInSec.toFixed(3)})'[coveredIntro]`,
-    );
-    visualOutput = "[coveredIntro]";
+    visualOutput = addCard(visualGraph, introInputIndex, visualOutput, "coveredIntro", openingSec, leadInSec);
   }
   if (outroInputIndex !== undefined) {
-    visualGraph.push(
-      `${visualOutput}[${outroInputIndex}:v]overlay=x=0:y=0:enable='between(t,${(leadInSec + sourceDur).toFixed(3)},${outputDur.toFixed(3)})'[coveredOutro]`,
-    );
-    visualOutput = "[coveredOutro]";
+    visualOutput = addCard(visualGraph, outroInputIndex, visualOutput, "coveredOutro", leadInSec + sourceDur, outputDur, true);
   }
   focusOverlays.forEach((overlay, index) => {
     const next = `[focus${index}]`;
@@ -588,7 +570,7 @@ export async function render(id: string) {
       const clean = ["-y", "-i", source];
       const cleanGraph: string[] = [];
       let cleanOutput = "[cleanBase]";
-      if (hasIntro) {
+      if (openingCard || introCard || outroCard) {
         let cleanNextInput = 1;
         let cleanOpeningInput: number | undefined;
         let cleanIntroInput: number | undefined;
@@ -606,25 +588,16 @@ export async function render(id: string) {
           clean.push("-framerate", String(timeline.fps), "-i", outroCard);
         }
         cleanGraph.push(
-          `[0:v]tpad=start_duration=${leadInSec}:start_mode=clone${outroSec ? `,tpad=stop_duration=${outroSec}:stop_mode=clone` : ""}[cleanBase]`,
+          `[0:v]tpad=start_duration=${leadInSec}:start_mode=clone:stop_duration=${outroSec}:stop_mode=clone[cleanBase]`,
         );
         if (cleanOpeningInput !== undefined) {
-          cleanGraph.push(
-            `${cleanOutput}[${cleanOpeningInput}:v]overlay=0:0:enable='between(t,0,${openingSec.toFixed(3)})'[cleanOpening]`,
-          );
-          cleanOutput = "[cleanOpening]";
+          cleanOutput = addCard(cleanGraph, cleanOpeningInput, cleanOutput, "cleanOpening", 0, openingSec);
         }
         if (cleanIntroInput !== undefined) {
-          cleanGraph.push(
-            `${cleanOutput}[${cleanIntroInput}:v]overlay=0:0:enable='between(t,${openingSec.toFixed(3)},${leadInSec.toFixed(3)})'[cleanIntro]`,
-          );
-          cleanOutput = "[cleanIntro]";
+          cleanOutput = addCard(cleanGraph, cleanIntroInput, cleanOutput, "cleanIntro", openingSec, leadInSec);
         }
         if (cleanOutroInput !== undefined) {
-          cleanGraph.push(
-            `${cleanOutput}[${cleanOutroInput}:v]overlay=0:0:enable='between(t,${(leadInSec + sourceDur).toFixed(3)},${outputDur.toFixed(3)})'[cleanOutro]`,
-          );
-          cleanOutput = "[cleanOutro]";
+          cleanOutput = addCard(cleanGraph, cleanOutroInput, cleanOutput, "cleanOutro", leadInSec + sourceDur, outputDur, true);
         }
         clean.push("-filter_complex", cleanGraph.join(";"), "-map", cleanOutput);
       } else {
@@ -742,7 +715,8 @@ export async function render(id: string) {
     const graph: string[] = [];
     audioEntries.forEach(({ file, step }, j) => {
       inputs.push("-i", file);
-      const delay = Math.max(0, Math.round((Number(step.startMs) || 0) + openingSec * 1000));
+      const delay = step.action === "introduction" ? openingSec * 1000
+        : Math.max(0, Math.round((Number(step.startMs) || 0) - INTRO_DURATION_MS + leadInSec * 1000));
       const label = `a${j}`;
       graph.push(`[${j + 1}:a]adelay=${delay}:all=1,aresample=async=1[${label}]`);
       labels.push(`[${label}]`);
@@ -784,14 +758,24 @@ export async function render(id: string) {
   checkCancelled(id);
   if (readMediaDuration(out) <= 0) throw new Error("Rendered video could not be verified.");
   const finalOutput = path.join(d, "tutorial.mp4");
+  const previousVideo = t.video;
   fs.renameSync(out, finalOutput);
   t.video = finalOutput;
+  t.videoOutdated = false;
   t.videoUpdatedAt = Date.now();
   t.videoOpeningMs = openingSec * 1000;
+  t.videoStepOffsetMs = leadInSec * 1000 - INTRO_DURATION_MS;
   t.status = "ready";
   t.stage = "ready";
   t.progress = 100;
   t.message = "Final tutorial video is ready.";
   save(t);
+  // The usual tutorial.mp4 was replaced atomically above. Remove a legacy
+  // differently named render only after the new output and metadata are saved.
+  if (previousVideo && path.resolve(previousVideo) !== path.resolve(finalOutput)
+      && path.dirname(path.resolve(previousVideo)) === path.resolve(d)
+      && ![t.recording, t.music, t.templateImage].includes(previousVideo)) {
+    try { if (fs.lstatSync(previousVideo).isFile()) fs.unlinkSync(previousVideo); } catch {}
+  }
   return finalOutput;
 }

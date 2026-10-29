@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
+import RecordingEditor from "./RecordingEditor";
 import {
   ArrowDown,
   ArrowUp,
@@ -31,6 +32,7 @@ export default function TutorialPage() {
   const [editingStep, setEditingStep] = useState(-1);
   const [templateBusy, setTemplateBusy] = useState(false);
   const [musicBusy, setMusicBusy] = useState(false);
+  const [videoEditing, setVideoEditing] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
   async function load() {
     const r = await fetch(`/api/tutorial?id=${id}`, { cache: "no-store" });
@@ -305,13 +307,17 @@ export default function TutorialPage() {
     setT({ ...t, steps: a });
   }
   function seek(i: number) {
+    if (t.videoOutdated) {
+      setMsg("Render again to synchronize video playback with the edited steps.");
+      return;
+    }
     const s = t.steps[i];
     if (videoRef.current && s) {
-      const base = t.steps[0]?.startMs || s.startMs;
       const openingMs = Number(t.videoOpeningMs) || 0;
+      const stepOffsetMs = t.videoStepOffsetMs ?? openingMs;
       videoRef.current.currentTime = Math.max(
         0,
-        (s.startMs - base + openingMs) / 1000,
+        (s.action === "introduction" ? openingMs : s.startMs + stepOffsetMs) / 1000,
       );
       videoRef.current.play().catch(() => {});
     }
@@ -323,9 +329,11 @@ export default function TutorialPage() {
     (t.steps[t.steps.length - 1]?.endMs || base) - base,
   );
   const openingMs = Number(t.videoOpeningMs) || 0;
-  const videoTimelineTotal = total + openingMs;
+  const stepOffsetMs = t.videoStepOffsetMs ?? openingMs;
+  const stepVideoMs = (s: any) => Math.max(0, s.action === "introduction" ? openingMs : s.startMs + stepOffsetMs);
+  const videoTimelineTotal = Math.max(1, ...t.steps.map((s: any) => s.endMs + stepOffsetMs));
   return (
-    <div className="p-8 max-w-7xl mx-auto">
+    <fieldset disabled={videoEditing} className="p-8 max-w-7xl mx-auto min-w-0">
       <header className="flex justify-between items-start gap-5">
         <div>
           <h1 className="text-3xl font-semibold">
@@ -464,16 +472,12 @@ export default function TutorialPage() {
           </div>
         </div>
         {assets?.hasRecording && (
-          <div className="mt-4">
-            <div className="text-sm font-medium mb-2">
-              Original browser recording
-            </div>
-            <video
-              className="w-full rounded bg-black max-h-[420px]"
-              controls
-              src={assets.recordingUrl}
-            />
-          </div>
+          <RecordingEditor id={id} src={assets.recordingUrl} recording={t.recording} disabled={rendering||busyStep>=0||musicBusy||templateBusy} onBusy={setVideoEditing}
+            onSaved={load} saveSteps={async()=>{
+              const response=await fetch("/api/tutorial/update",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({id,steps:t.steps})});
+              const result=await response.json();
+              if(!response.ok) throw new Error(result.error||"Save step edits first.");
+            }}/>
         )}
         {assets?.screenshots?.length ? (
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-5">
@@ -503,6 +507,11 @@ export default function TutorialPage() {
       <div className="grid lg:grid-cols-[1.4fr_1fr] gap-5 mt-8">
         <div className="space-y-3">
           <div className="card overflow-hidden">
+            {t.videoUrl && t.videoOutdated && (
+              <div role="status" className="px-4 py-3 text-sm text-amber-300 bg-amber-950/30">
+                Outdated — showing the previous render. Render again to apply your edits.
+              </div>
+            )}
             <div className="aspect-video bg-black grid place-items-center">
               {t.videoUrl ? (
                 <video
@@ -513,11 +522,12 @@ export default function TutorialPage() {
                   onTimeUpdate={(e) => {
                     const sec = e.currentTarget.currentTime || 0;
                     setScrub(sec * 1000);
+                    if (t.videoOutdated) { setCurrent(-1); return; }
                     if (sec * 1000 < openingMs) {
                       setCurrent(-1);
                       return;
                     }
-                    const tm = Math.max(0, sec * 1000 - openingMs) + base;
+                    const tm = Math.max(0, sec * 1000 - stepOffsetMs);
                     const idx = t.steps.findIndex(
                       (x: any) => tm >= x.startMs && tm <= x.endMs,
                     );
@@ -531,7 +541,7 @@ export default function TutorialPage() {
               )}
             </div>
           </div>
-          {t.videoUrl && (
+          {t.videoUrl && !t.videoOutdated && (
             <div className="card p-4">
               <div className="flex justify-between text-xs muted mb-2">
                 <span>Timeline</span>
@@ -554,14 +564,14 @@ export default function TutorialPage() {
                   <button
                     key={i}
                     onClick={() => {
-                      const v = Math.max(0, s.startMs - base + openingMs);
+                      const v = stepVideoMs(s);
                       setScrub(v);
                       if (videoRef.current)
                         videoRef.current.currentTime = v / 1000;
                     }}
                     className="absolute top-0 text-[10px] muted"
                     style={{
-                      left: `${Math.min(96, Math.max(0, ((s.startMs - base + openingMs) / videoTimelineTotal) * 100))}%`,
+                      left: `${Math.min(96, Math.max(0, (stepVideoMs(s) / videoTimelineTotal) * 100))}%`,
                     }}
                   >
                     ● {i + 1}
@@ -714,6 +724,6 @@ export default function TutorialPage() {
           {msg}
         </div>
       )}
-    </div>
+    </fieldset>
   );
 }

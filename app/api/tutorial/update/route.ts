@@ -2,10 +2,12 @@ import { NextResponse } from "next/server";
 import { get, save } from "../../../../lib/store";
 import { validateTutorialSteps } from "../../../../lib/ai";
 import { renderActive } from "../../../../lib/render";
+import { videoEditActive } from "../../../../lib/video-edits";
 export const runtime = "nodejs";
 export async function POST(req: Request) {
   try {
     const { id, steps } = await req.json();
+    if (videoEditActive(id)) return NextResponse.json({error:"Wait for video edits to finish saving."},{status:409});
     const t = get(id);
     if (!t) return NextResponse.json({ error: "Not found" }, { status: 404 });
     if (renderActive(id)) return NextResponse.json({ error: "Cancel or finish the current render before saving edits." }, { status: 409 });
@@ -15,7 +17,7 @@ export async function POST(req: Request) {
         s.action === "introduction" ? old.action === "introduction" :
         Number.isInteger(s.actionIndex) ? old.action !== "introduction" && old.actionIndex === s.actionIndex :
         old.startMs === s.startMs && old.action === s.action && old.selector === s.selector);
-      const title = String(s.title || `Step ${i + 1}`);
+      const title = s.action === "introduction" ? "Welcome step" : String(s.title || `Step ${i + 1}`);
       const instruction = String(s.instruction || "Complete this step.");
       const textChanged = !previous || previous.title !== title || previous.instruction !== instruction;
       return {
@@ -31,7 +33,7 @@ export async function POST(req: Request) {
     });
     t.status = "review"; t.stage = "steps"; t.progress = 0;
     t.message = "Edits saved. Render to use the updated steps and narration.";
-    t.video = undefined;
+    t.videoOutdated = !!t.video;
     save(t);
     return NextResponse.json({ ok: true, validation: validateTutorialSteps(id) });
   } catch (e: any) {

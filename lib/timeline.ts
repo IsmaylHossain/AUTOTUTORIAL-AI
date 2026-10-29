@@ -33,7 +33,7 @@ export type Timeline = {
   steps: Step[];
 };
 export function readActions(id: string): TimelineAction[] {
-  const p = path.join(dir(id), "actions.json");
+  const p = path.join(dir(id), path.basename(get(id)?.actionsFile || "actions.json"));
   if (!fs.existsSync(p)) return [];
   return fs
     .readFileSync(p, "utf8")

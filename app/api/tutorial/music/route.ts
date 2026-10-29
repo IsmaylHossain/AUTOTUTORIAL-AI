@@ -98,8 +98,7 @@ export async function POST(req: Request) {
     fs.renameSync(temporary, output);
     tutorial.music = output;
     tutorial.musicName = String(music.name || "Background music").slice(0, 180);
-    tutorial.video = undefined;
-    tutorial.videoOpeningMs = undefined;
+    tutorial.videoOutdated = !!tutorial.video;
     tutorial.status = "review";
     tutorial.stage = "steps";
     tutorial.message = "Music saved. Render again to replace step narration with music.";
@@ -121,8 +120,7 @@ export async function DELETE(req: Request) {
   removeProjectMusic(dir(id));
   tutorial.music = undefined;
   tutorial.musicName = undefined;
-  tutorial.video = undefined;
-  tutorial.videoOpeningMs = undefined;
+  tutorial.videoOutdated = !!tutorial.video;
   tutorial.status = "review";
   tutorial.stage = "steps";
   tutorial.message = "Music removed. Step narration will be used again.";

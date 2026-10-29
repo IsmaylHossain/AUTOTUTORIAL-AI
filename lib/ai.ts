@@ -118,7 +118,7 @@ async function requestAiJson<T>(
 }
 
 function readActions(id: string) {
-  const file = path.join(dir(id), "actions.json");
+  const file = path.join(dir(id), path.basename(get(id)?.actionsFile || "actions.json"));
   if (!fs.existsSync(file)) return [];
   return fs
     .readFileSync(file, "utf8")
@@ -752,7 +752,7 @@ export async function regenerateStep(id: string, index: number) {
   tutorial.status = "review";
   tutorial.stage = "steps";
   tutorial.message = `Step ${index + 1} regenerated with ${textSource === "ai" ? providerName(config) : "local templates"}.`;
-  tutorial.video = undefined;
+  tutorial.videoOutdated = !!tutorial.video;
   save(tutorial);
   return tutorial.steps[index];
 }

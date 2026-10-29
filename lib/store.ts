@@ -54,9 +54,14 @@ export type Tutorial = {
   settings?: Record<string, unknown>;
   steps: Step[];
   recording?: string;
+  actionsFile?: string;
+  recordingIsActive?: boolean;
+  recordingCleanupFiles?: string[];
   video?: string;
+  videoOutdated?: boolean;
   videoUpdatedAt?: number;
   videoOpeningMs?: number;
+  videoStepOffsetMs?: number;
   templateImage?: string;
   music?: string;
   musicName?: string;
@@ -117,9 +122,14 @@ function repairPaths(t: Tutorial) {
   };
   t.recording = repair(t.recording);
   t.video = repair(t.video);
+  // Restore the last successful render hidden by older save behavior.
+  if (!t.video && fs.existsSync(path.join(d, "tutorial.mp4"))) {
+    t.video = path.join(d, "tutorial.mp4");
+    t.videoOutdated = true;
+  }
   t.templateImage = repair(t.templateImage);
   t.music = repair(t.music);
-  t.steps = (t.steps || []).map((s) => ({ ...s, audio: repair(s.audio) }));
+  t.steps = (t.steps || []).map((s) => ({ ...s, title: s.action === "introduction" ? "Welcome step" : s.title, audio: repair(s.audio) }));
   return t;
 }
 export function dir(id: string) {
@@ -130,6 +140,9 @@ export function dir(id: string) {
   return d;
 }
 export function save(t: Tutorial) {
+  for (const step of t.steps || []) {
+    if (step.action === "introduction") step.title = "Welcome step";
+  }
   fs.writeFileSync(
     path.join(dir(t.id), "tutorial.json"),
     JSON.stringify(t, null, 2),

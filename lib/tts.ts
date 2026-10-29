@@ -233,6 +233,7 @@ export async function generateTTS(id: string, index: number) {
   normalizeWavHeader(output);
   step.audio = output;
   step.audioText = text;
+  t.videoOutdated = !!t.video;
   step.voiceSource = voiceSource;
   save(t);
   return output;

@@ -2,6 +2,7 @@ import fs from "fs";
 import path from "path";
 import { NextResponse } from "next/server";
 import { dir, get } from "../../../lib/store";
+import { recordingPreview } from "../../../lib/recording-preview";
 export const runtime = "nodejs";
 function mime(file: string) {
   const e = path.extname(file).toLowerCase();
@@ -46,12 +47,20 @@ export async function GET(req: Request) {
         };
       });
     const hasRecording = !!t.recording && fs.existsSync(t.recording);
+    let preview: string | undefined;
+    if (hasRecording) {
+      try {
+        preview = await recordingPreview(id);
+      } catch (error: any) {
+        return NextResponse.json({ error: error.message || "Could not prepare recording preview." }, { status: 500 });
+      }
+    }
     const hasVideo = !!t.video && fs.existsSync(t.video);
     return NextResponse.json({
       screenshots,
       hasRecording,
       recordingUrl: hasRecording
-        ? `/api/assets?id=${encodeURIComponent(id)}&file=${encodeURIComponent(path.basename(t.recording!))}`
+        ? `/api/assets?id=${encodeURIComponent(id)}&file=${encodeURIComponent(path.basename(preview!))}`
         : null,
       hasVideo,
       videoUrl: hasVideo ? `/api/video?id=${encodeURIComponent(id)}` : null,

@@ -179,7 +179,7 @@ export async function createPptx(id: string): Promise<ArrayBuffer> {
       h: 0,
       line: { color: colors.focus, width: 2.5 },
     });
-    intro.addText(welcome?.title || `Welcome to '${t.name}' Tutorial.`, {
+    intro.addText(welcome?.instruction || `Welcome to '${t.name}' Tutorial.`, {
       x: 1.85,
       y: 5.91,
       w: 9.63,
@@ -247,7 +247,7 @@ export async function createPptx(id: string): Promise<ArrayBuffer> {
     color: "A5B4FC",
     margin: 0,
   });
-  intro.addText(welcome?.title || t.name, {
+  intro.addText(t.name, {
     x: 0.75,
     y: 2.18,
     w: 11.6,

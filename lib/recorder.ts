@@ -5,6 +5,7 @@ import path from "path";
 import fs from "fs";
 import { ffmpegPath, waitForMediaDuration } from "./media";
 import { dir, get, remove, save, settings } from "./store";
+import { finalizeActiveRecording } from "./recording-preview";
 type PageTrack = { page: Page; video: Video | null; videoStartedAt: number };
 type WindowSegment = { page: Page; startAt: number; endAt?: number };
 type Session = {
@@ -26,6 +27,7 @@ type Session = {
     { path: string; promise: Promise<void>; activeMs: number }
   >;
   pageTracks: Map<Page, PageTrack>;
+  rawVideos?: string[];
   windowSegments: WindowSegment[];
   activePage: Page;
   stopping: boolean;
@@ -187,7 +189,7 @@ function activeMsAt(s: Session, timestamp: number) {
 }
 
 function markActivePage(session: Session, page: Page, timestamp = Date.now()) {
-  if (page.isClosed()) return;
+  if (session.stopping || page.isClosed()) return;
   session.activePage = page;
   if (!session.ready) return;
   const startAt = Math.max(session.started, timestamp);
@@ -266,11 +268,12 @@ async function combineWindowVideos(id: string, session: Session, stoppedAt: numb
     await waitForMediaDuration(file, 15000, 1024);
     videoByPage.set(track.page, file);
   }
+  session.rawVideos = [...new Set(videoByPage.values())];
   const segments = session.windowSegments
     .map((segment) => {
       const track = session.pageTracks.get(segment.page);
       const file = videoByPage.get(segment.page);
-      const endAt = segment.endAt || stoppedAt;
+      const endAt = Math.min(segment.endAt || stoppedAt, stoppedAt);
       if (!track || !file || endAt - segment.startAt < 50) return null;
       return {
         file,
@@ -655,7 +658,7 @@ export async function stopRecording(id: string) {
         t.recording = video;
         save(t);
       }
-      return video;
+      return t ? await finalizeActiveRecording(id) : video;
     }
     throw new Error("Recording session not found");
   }
@@ -715,13 +718,15 @@ export async function stopRecording(id: string) {
     t.stage = "recorded";
     t.progress = 5;
     t.recording = video;
+    t.recordingIsActive = false;
+    t.recordingCleanupFiles = [...new Set([...(s.rawVideos || []), video].map(file => path.basename(file)))];
     t.message =
       finalDuration > 0
         ? "Recording saved and ready for analysis."
         : "Recording saved. The browser video is still finalizing; the render step will retry when it is ready.";
     save(t);
   }
-  return video;
+  return await finalizeActiveRecording(id);
 }
 export async function cancelRecording(id: string) {
   const s = sessions.get(id);
